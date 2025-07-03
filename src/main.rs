@@ -1,4 +1,10 @@
 use eframe::egui;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio::sync::mpsc;
+
+mod installer;
+use installer::{RethInstaller, InstallStatus};
 
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
@@ -10,30 +16,133 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "Reth Desktop",
         options,
-        Box::new(|_cc| Box::<MyApp>::default()),
+        Box::new(|cc| Box::new(MyApp::new(cc))),
     )
 }
 
 struct MyApp {
+    installer: Arc<Mutex<RethInstaller>>,
+    install_status: InstallStatus,
+    installing: bool,
+    _runtime: tokio::runtime::Runtime,
+    install_sender: mpsc::UnboundedSender<InstallCommand>,
 }
 
-impl Default for MyApp {
-    fn default() -> Self {
+enum InstallCommand {
+    StartInstall(Arc<Mutex<RethInstaller>>, egui::Context),
+    ResetInstaller(Arc<Mutex<RethInstaller>>),
+}
+
+impl MyApp {
+    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        let runtime = tokio::runtime::Runtime::new().expect("Unable to create Runtime");
+        let (tx, mut rx) = mpsc::unbounded_channel::<InstallCommand>();
+        
+        // Spawn a task to handle installation commands
+        runtime.spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    InstallCommand::StartInstall(installer, ctx) => {
+                        let mut installer = installer.lock().await;
+                        if let Err(_e) = installer.install_reth().await {
+                            // Error is already handled in the installer
+                        }
+                        ctx.request_repaint();
+                    }
+                    InstallCommand::ResetInstaller(installer) => {
+                        let mut installer = installer.lock().await;
+                        *installer = RethInstaller::new();
+                    }
+                }
+            }
+        });
+        
         Self {
+            installer: Arc::new(Mutex::new(RethInstaller::new())),
+            install_status: InstallStatus::Idle,
+            installing: false,
+            _runtime: runtime,
+            install_sender: tx,
         }
+    }
+
+    fn start_installation(&mut self, ctx: egui::Context) {
+        self.installing = true;
+        let installer = Arc::clone(&self.installer);
+        
+        // Send command to tokio runtime
+        let _ = self.install_sender.send(InstallCommand::StartInstall(installer, ctx));
+    }
+    
+    fn reset_installer(&mut self) {
+        let installer = Arc::clone(&self.installer);
+        let _ = self.install_sender.send(InstallCommand::ResetInstaller(installer));
     }
 }
 
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Update status from installer using try_lock
+        if let Ok(installer) = self.installer.try_lock() {
+            self.install_status = installer.status().clone();
+            if matches!(self.install_status, InstallStatus::Completed | InstallStatus::Error(_)) {
+                self.installing = false;
+            }
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Reth Desktop");
+            ui.heading("Reth Desktop Installer");
             
             ui.separator();
             
-            if ui.button("Click me!").clicked() {
-                // Button doesn't do anything yet
+            ui.label("Install Reth Ethereum execution client");
+            
+            ui.add_space(20.0);
+            
+            match &self.install_status {
+                InstallStatus::Idle => {
+                    if ui.button("Install Reth").clicked() && !self.installing {
+                        self.start_installation(ctx.clone());
+                    }
+                }
+                InstallStatus::Downloading(progress) => {
+                    ui.label(format!("Downloading... {:.1}%", progress));
+                    ui.add(egui::ProgressBar::new(progress / 100.0));
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                }
+                InstallStatus::Extracting => {
+                    ui.label("Extracting files...");
+                    ui.spinner();
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                }
+                InstallStatus::Completed => {
+                    ui.colored_label(egui::Color32::GREEN, "✓ Installation completed!");
+                    ui.label("Reth has been installed to ~/.reth-desktop/bin/");
+                    
+                    if ui.button("Install Again").clicked() {
+                        self.install_status = InstallStatus::Idle;
+                        self.reset_installer();
+                    }
+                }
+                InstallStatus::Error(error) => {
+                    ui.colored_label(egui::Color32::RED, format!("❌ Error: {}", error));
+                    
+                    if ui.button("Try Again").clicked() {
+                        self.install_status = InstallStatus::Idle;
+                        self.reset_installer();
+                    }
+                }
             }
+            
+            ui.add_space(20.0);
+            
+            ui.separator();
+            
+            ui.horizontal(|ui| {
+                ui.label("Platform:");
+                ui.label(std::env::consts::OS);
+                ui.label(std::env::consts::ARCH);
+            });
         });
     }
 }
