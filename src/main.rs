@@ -5,14 +5,18 @@ use tokio::sync::mpsc;
 
 mod installer;
 mod system_check;
+mod theme;
 
 use installer::{RethInstaller, InstallStatus};
 use system_check::SystemRequirements;
+use theme::RethTheme;
 
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([800.0, 600.0]),
+            .with_inner_size([900.0, 700.0])
+            .with_min_inner_size([600.0, 500.0])
+            .with_title("Reth Desktop Installer"),
         ..Default::default()
     };
     
@@ -87,6 +91,9 @@ impl MyApp {
 
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Apply custom theme
+        RethTheme::apply(ctx);
+        
         // Update status from installer using try_lock
         if let Ok(installer) = self.installer.try_lock() {
             self.install_status = installer.status().clone();
@@ -96,102 +103,229 @@ impl eframe::App for MyApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Reth Desktop Installer");
+            ui.add_space(40.0);
             
-            ui.separator();
-            
-            ui.label("Install Reth Ethereum execution client");
-            
-            ui.add_space(20.0);
-            
-            // System Requirements Section
-            ui.group(|ui| {
-                ui.label(egui::RichText::new("MinimumSystem Requirements").strong());
-                ui.add_space(10.0);
-                
-                // Disk Space Requirement
-                ui.horizontal(|ui| {
-                    if self.system_requirements.disk_space.meets_requirement {
-                        ui.colored_label(egui::Color32::GREEN, "✓");
-                    } else {
-                        ui.colored_label(egui::Color32::RED, "✗");
-                    }
-                    ui.label(format!(
-                        "Disk Space: {:.1} GB available / {:.0} GB required",
-                        self.system_requirements.disk_space.available_gb,
-                        self.system_requirements.disk_space.required_gb
-                    ));
-                });
-                
-                // Memory Requirement
-                ui.horizontal(|ui| {
-                    if self.system_requirements.memory.meets_requirement {
-                        ui.colored_label(egui::Color32::GREEN, "✓");
-                    } else {
-                        ui.colored_label(egui::Color32::RED, "✗");
-                    }
-                    ui.label(format!(
-                        "Memory: {:.1} GB total / {:.0} GB required",
-                        self.system_requirements.memory.total_gb,
-                        self.system_requirements.memory.required_gb
-                    ));
-                });
+            // Header section with Reth branding
+            ui.vertical_centered(|ui| {
+                ui.label(RethTheme::heading_text("RETH"));
+                ui.add_space(8.0);
+                ui.label(RethTheme::muted_text("Rust Ethereum Execution Client"));
+                ui.add_space(4.0);
+                ui.label(RethTheme::muted_text("Modular, contributor-friendly and blazing-fast"));
             });
             
-            ui.add_space(20.0);
+            ui.add_space(40.0);
             
-            // Show warning if requirements not met
-            if !self.system_requirements.all_requirements_met() {
-                ui.colored_label(
-                    egui::Color32::from_rgb(255, 165, 0), // Orange
-                    "⚠ Warning: Your system does not meet all requirements. Installation may fail or Reth may not run properly."
-                );
-                ui.add_space(10.0);
-            }
-            
-            match &self.install_status {
-                InstallStatus::Idle => {
-                    if ui.button("Install Reth").clicked() && !self.installing {
-                        self.start_installation(ctx.clone());
+            // Main content area
+            ui.vertical_centered_justified(|ui| {
+                let max_width = 600.0;
+                
+                // System Requirements Card
+                egui::Frame::none()
+                    .fill(RethTheme::SURFACE)
+                    .rounding(12.0)
+                    .inner_margin(24.0)
+                    .stroke(egui::Stroke::new(1.0, RethTheme::BORDER))
+                    .show(ui, |ui| {
+                        ui.set_max_width(max_width);
+                        
+                        ui.label(RethTheme::subheading_text("System Requirements"));
+                        ui.add_space(16.0);
+                        
+                        // Disk Space Requirement with modern styling
+                        egui::Frame::none()
+                            .fill(RethTheme::BACKGROUND)
+                            .rounding(8.0)
+                            .inner_margin(16.0)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let (icon, color) = if self.system_requirements.disk_space.meets_requirement {
+                                        ("✓", RethTheme::SUCCESS)
+                                    } else {
+                                        ("✗", RethTheme::ERROR)
+                                    };
+                                    
+                                    ui.label(egui::RichText::new(icon).size(18.0).color(color));
+                                    ui.add_space(12.0);
+                                    
+                                    ui.vertical(|ui| {
+                                        ui.label(RethTheme::body_text("Storage Space"));
+                                        ui.label(RethTheme::muted_text(&format!(
+                                            "{:.1} GB available / {:.0} GB required",
+                                            self.system_requirements.disk_space.available_gb,
+                                            self.system_requirements.disk_space.required_gb
+                                        )));
+                                    });
+                                });
+                            });
+                        
+                        ui.add_space(12.0);
+                        
+                        // Memory Requirement with modern styling
+                        egui::Frame::none()
+                            .fill(RethTheme::BACKGROUND)
+                            .rounding(8.0)
+                            .inner_margin(16.0)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let (icon, color) = if self.system_requirements.memory.meets_requirement {
+                                        ("✓", RethTheme::SUCCESS)
+                                    } else {
+                                        ("✗", RethTheme::ERROR)
+                                    };
+                                    
+                                    ui.label(egui::RichText::new(icon).size(18.0).color(color));
+                                    ui.add_space(12.0);
+                                    
+                                    ui.vertical(|ui| {
+                                        ui.label(RethTheme::body_text("Memory (RAM)"));
+                                        ui.label(RethTheme::muted_text(&format!(
+                                            "{:.1} GB total / {:.0} GB required",
+                                            self.system_requirements.memory.total_gb,
+                                            self.system_requirements.memory.required_gb
+                                        )));
+                                    });
+                                });
+                            });
+                    });
+                
+                ui.add_space(24.0);
+                
+                // Warning message if requirements not met
+                if !self.system_requirements.all_requirements_met() {
+                    egui::Frame::none()
+                        .fill(RethTheme::WARNING.gamma_multiply(0.1))
+                        .rounding(8.0)
+                        .inner_margin(16.0)
+                        .stroke(egui::Stroke::new(1.0, RethTheme::WARNING))
+                        .show(ui, |ui| {
+                            ui.set_max_width(max_width);
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("⚠").size(18.0).color(RethTheme::WARNING));
+                                ui.add_space(8.0);
+                                ui.vertical(|ui| {
+                                    ui.label(RethTheme::warning_text("System Requirements Warning"));
+                                    ui.label(RethTheme::muted_text("Your system does not meet all requirements. Installation may fail or Reth may not run properly."));
+                                });
+                            });
+                        });
+                    ui.add_space(16.0);
+                }
+                
+                // Installation section
+                match &self.install_status {
+                    InstallStatus::Idle => {
+                        ui.vertical_centered(|ui| {
+                            let button = egui::Button::new(
+                                egui::RichText::new("Install Reth")
+                                    .size(16.0)
+                                    .color(RethTheme::TEXT_PRIMARY)
+                            )
+                            .min_size(egui::vec2(200.0, 50.0))
+                            .fill(RethTheme::PRIMARY);
+                            
+                            if ui.add(button).clicked() && !self.installing {
+                                self.start_installation(ctx.clone());
+                            }
+                        });
+                    }
+                    InstallStatus::Downloading(progress) => {
+                        egui::Frame::none()
+                            .fill(RethTheme::SURFACE)
+                            .rounding(8.0)
+                            .inner_margin(20.0)
+                            .show(ui, |ui| {
+                                ui.set_max_width(max_width);
+                                ui.vertical_centered(|ui| {
+                                    ui.label(RethTheme::body_text(&format!("Downloading Reth... {:.1}%", progress)));
+                                    ui.add_space(8.0);
+                                    
+                                    let progress_bar = egui::ProgressBar::new(progress / 100.0)
+                                        .desired_width(max_width - 40.0)
+                                        .animate(true)
+                                        .fill(RethTheme::PRIMARY);
+                                    ui.add(progress_bar);
+                                });
+                            });
+                        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                    }
+                    InstallStatus::Extracting => {
+                        egui::Frame::none()
+                            .fill(RethTheme::SURFACE)
+                            .rounding(8.0)
+                            .inner_margin(20.0)
+                            .show(ui, |ui| {
+                                ui.set_max_width(max_width);
+                                ui.vertical_centered(|ui| {
+                                    ui.label(RethTheme::body_text("Extracting files..."));
+                                    ui.add_space(8.0);
+                                    ui.spinner();
+                                });
+                            });
+                        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                    }
+                    InstallStatus::Completed => {
+                        egui::Frame::none()
+                            .fill(RethTheme::SUCCESS.gamma_multiply(0.1))
+                            .rounding(8.0)
+                            .inner_margin(20.0)
+                            .stroke(egui::Stroke::new(1.0, RethTheme::SUCCESS))
+                            .show(ui, |ui| {
+                                ui.set_max_width(max_width);
+                                ui.vertical_centered(|ui| {
+                                    ui.label(RethTheme::success_text("✓ Installation Completed!"));
+                                    ui.add_space(8.0);
+                                    ui.label(RethTheme::muted_text("Reth has been installed to ~/.reth-desktop/bin/"));
+                                    ui.add_space(16.0);
+                                    
+                                    let button = egui::Button::new(RethTheme::body_text("Install Again"))
+                                        .min_size(egui::vec2(120.0, 36.0));
+                                    
+                                    if ui.add(button).clicked() {
+                                        self.install_status = InstallStatus::Idle;
+                                        self.reset_installer();
+                                    }
+                                });
+                            });
+                    }
+                    InstallStatus::Error(error) => {
+                        let error_message = error.clone();
+                        egui::Frame::none()
+                            .fill(RethTheme::ERROR.gamma_multiply(0.1))
+                            .rounding(8.0)
+                            .inner_margin(20.0)
+                            .stroke(egui::Stroke::new(1.0, RethTheme::ERROR))
+                            .show(ui, |ui| {
+                                ui.set_max_width(max_width);
+                                ui.vertical_centered(|ui| {
+                                    ui.label(RethTheme::error_text("❌ Installation Failed"));
+                                    ui.add_space(8.0);
+                                    ui.label(RethTheme::muted_text(&error_message));
+                                    ui.add_space(16.0);
+                                    
+                                    let button = egui::Button::new(RethTheme::body_text("Try Again"))
+                                        .min_size(egui::vec2(120.0, 36.0));
+                                    
+                                    if ui.add(button).clicked() {
+                                        self.install_status = InstallStatus::Idle;
+                                        self.reset_installer();
+                                    }
+                                });
+                            });
                     }
                 }
-                InstallStatus::Downloading(progress) => {
-                    ui.label(format!("Downloading... {:.1}%", progress));
-                    ui.add(egui::ProgressBar::new(progress / 100.0));
-                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
-                }
-                InstallStatus::Extracting => {
-                    ui.label("Extracting files...");
-                    ui.spinner();
-                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
-                }
-                InstallStatus::Completed => {
-                    ui.colored_label(egui::Color32::GREEN, "✓ Installation completed!");
-                    ui.label("Reth has been installed to ~/.reth-desktop/bin/");
-                    
-                    if ui.button("Install Again").clicked() {
-                        self.install_status = InstallStatus::Idle;
-                        self.reset_installer();
-                    }
-                }
-                InstallStatus::Error(error) => {
-                    ui.colored_label(egui::Color32::RED, format!("❌ Error: {}", error));
-                    
-                    if ui.button("Try Again").clicked() {
-                        self.install_status = InstallStatus::Idle;
-                        self.reset_installer();
-                    }
-                }
-            }
+            });
             
-            ui.add_space(20.0);
-            
-            ui.separator();
-            
-            ui.horizontal(|ui| {
-                ui.label("Platform:");
-                ui.label(std::env::consts::OS);
-                ui.label(std::env::consts::ARCH);
+            // Footer with platform info
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                ui.add_space(20.0);
+                ui.horizontal(|ui| {
+                    ui.label(RethTheme::muted_text("Platform:"));
+                    ui.label(RethTheme::muted_text(std::env::consts::OS));
+                    ui.label(RethTheme::muted_text("•"));
+                    ui.label(RethTheme::muted_text(std::env::consts::ARCH));
+                });
+                ui.add_space(16.0);
             });
         });
     }
