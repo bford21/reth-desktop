@@ -1,0 +1,8 @@
+[package]
+name = "reth-desktop"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.25.0"
+egui = "0.25.0"
