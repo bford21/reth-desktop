@@ -34,6 +34,7 @@ struct MyApp {
     _runtime: tokio::runtime::Runtime,
     install_sender: mpsc::UnboundedSender<InstallCommand>,
     system_requirements: SystemRequirements,
+    reth_logo: Option<egui::TextureHandle>,
 }
 
 enum InstallCommand {
@@ -42,9 +43,12 @@ enum InstallCommand {
 }
 
 impl MyApp {
-    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let runtime = tokio::runtime::Runtime::new().expect("Unable to create Runtime");
         let (tx, mut rx) = mpsc::unbounded_channel::<InstallCommand>();
+        
+        // Load the Reth logo
+        let reth_logo = Self::load_logo(&cc.egui_ctx);
         
         // Spawn a task to handle installation commands
         runtime.spawn(async move {
@@ -72,7 +76,36 @@ impl MyApp {
             _runtime: runtime,
             install_sender: tx,
             system_requirements: SystemRequirements::check(),
+            reth_logo,
         }
+    }
+    
+    fn load_logo(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        // Try multiple possible paths for the reth-docs.png image
+        let possible_paths = [
+            "assets/reth-docs.png",
+            "./assets/reth-docs.png", 
+            "../assets/reth-docs.png",
+            "reth-docs.png"
+        ];
+        
+        for path in &possible_paths {
+            match image::open(path) {
+                Ok(img) => {
+                    let rgba = img.to_rgba8();
+                    let size = [img.width() as usize, img.height() as usize];
+                    let pixels = rgba.as_flat_samples();
+                    
+                    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
+                    println!("Successfully loaded logo from: {}", path);
+                    return Some(ctx.load_texture("reth-logo", color_image, egui::TextureOptions::default()));
+                }
+                Err(_) => continue,
+            }
+        }
+        
+        eprintln!("Failed to load reth-docs.png from any path");
+        None
     }
 
     fn start_installation(&mut self, ctx: egui::Context) {
@@ -103,18 +136,34 @@ impl eframe::App for MyApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(40.0);
-            
-            // Header section with Reth branding
-            ui.vertical_centered(|ui| {
-                ui.label(RethTheme::heading_text("RETH"));
-                ui.add_space(8.0);
-                ui.label(RethTheme::muted_text("Rust Ethereum Execution Client"));
-                ui.add_space(4.0);
-                ui.label(RethTheme::muted_text("Modular, contributor-friendly and blazing-fast"));
-            });
-            
-            ui.add_space(40.0);
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    ui.add_space(40.0);
+                    
+                    // Header section with Reth branding and logo
+                    ui.vertical_centered(|ui| {
+                        // Display logo if available
+                        if let Some(logo_texture) = &self.reth_logo {
+                            let logo_size = logo_texture.size_vec2();
+                            // Scale the logo to a reasonable size (max 200px width)
+                            let scale = (200.0 / logo_size.x).min(1.0);
+                            let display_size = logo_size * scale;
+                            
+                            ui.add(egui::Image::new(logo_texture).max_size(display_size));
+                            ui.add_space(16.0);
+                        } else {
+                            // Fallback text header if image fails to load
+                            ui.label(RethTheme::heading_text("RETH"));
+                            ui.add_space(8.0);
+                        }
+                        
+                        ui.label(RethTheme::muted_text("Rust Ethereum Execution Client"));
+                        ui.add_space(4.0);
+                        ui.label(RethTheme::muted_text("Modular, contributor-friendly and blazing-fast"));
+                    });
+                    
+                    ui.add_space(40.0);
             
             // Main content area
             ui.vertical_centered_justified(|ui| {
@@ -229,6 +278,21 @@ impl eframe::App for MyApp {
                             }
                         });
                     }
+                    InstallStatus::FetchingVersion => {
+                        egui::Frame::none()
+                            .fill(RethTheme::SURFACE)
+                            .rounding(8.0)
+                            .inner_margin(20.0)
+                            .show(ui, |ui| {
+                                ui.set_max_width(max_width);
+                                ui.vertical_centered(|ui| {
+                                    ui.label(RethTheme::body_text("Fetching latest version..."));
+                                    ui.add_space(8.0);
+                                    ui.spinner();
+                                });
+                            });
+                        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                    }
                     InstallStatus::Downloading(progress) => {
                         egui::Frame::none()
                             .fill(RethTheme::SURFACE)
@@ -314,18 +378,19 @@ impl eframe::App for MyApp {
                             });
                     }
                 }
-            });
-            
-            // Footer with platform info
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                ui.add_space(20.0);
-                ui.horizontal(|ui| {
-                    ui.label(RethTheme::muted_text("Platform:"));
-                    ui.label(RethTheme::muted_text(std::env::consts::OS));
-                    ui.label(RethTheme::muted_text("•"));
-                    ui.label(RethTheme::muted_text(std::env::consts::ARCH));
                 });
-                ui.add_space(16.0);
+                
+                // Footer with platform info
+                ui.add_space(40.0);
+                ui.vertical_centered(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RethTheme::muted_text("Platform:"));
+                        ui.label(RethTheme::muted_text(std::env::consts::OS));
+                        ui.label(RethTheme::muted_text("•"));
+                        ui.label(RethTheme::muted_text(std::env::consts::ARCH));
+                    });
+                });
+                ui.add_space(20.0);
             });
         });
     }

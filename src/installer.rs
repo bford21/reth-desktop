@@ -3,14 +3,23 @@ use std::path::PathBuf;
 use std::io::Cursor;
 use flate2::read::GzDecoder;
 use tar::Archive;
+use serde::Deserialize;
 
 #[derive(Debug, Clone)]
 pub enum InstallStatus {
     Idle,
+    FetchingVersion,
     Downloading(f32), // Progress percentage
     Extracting,
     Completed,
     Error(String),
+}
+
+#[derive(Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    prerelease: bool,
+    draft: bool,
 }
 
 pub struct RethInstaller {
@@ -39,9 +48,12 @@ impl RethInstaller {
     }
 
     async fn install_reth_inner(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Fetch latest version
+        self.status = InstallStatus::FetchingVersion;
+        let version = fetch_latest_version().await?;
+        
         // Determine platform
         let platform = get_platform();
-        let version = "v1.5.0"; // You might want to fetch latest version dynamically
         
         // Construct download URL
         let binary_name = format!("reth-{}-{}.tar.gz", version, platform);
@@ -120,6 +132,51 @@ fn get_platform() -> &'static str {
         all(target_os = "windows", target_arch = "x86_64")
     )))]
     panic!("Unsupported platform");
+}
+
+async fn fetch_latest_version() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    const FALLBACK_VERSION: &str = "v1.5.0";
+    
+    let url = "https://api.github.com/repos/paradigmxyz/reth/releases/latest";
+    
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    
+    match client
+        .get(url)
+        .header("User-Agent", "reth-desktop/1.0")
+        .send()
+        .await
+    {
+        Ok(response) => {
+            if !response.status().is_success() {
+                eprintln!("GitHub API returned HTTP {}, using fallback version {}", response.status(), FALLBACK_VERSION);
+                return Ok(FALLBACK_VERSION.to_string());
+            }
+            
+            match response.json::<GitHubRelease>().await {
+                Ok(release) => {
+                    // Skip prerelease and draft versions
+                    if release.prerelease || release.draft {
+                        eprintln!("Latest release is prerelease/draft, using fallback version {}", FALLBACK_VERSION);
+                        return Ok(FALLBACK_VERSION.to_string());
+                    }
+                    
+                    println!("Fetched latest version: {}", release.tag_name);
+                    Ok(release.tag_name)
+                }
+                Err(e) => {
+                    eprintln!("Failed to parse GitHub API response: {}, using fallback version {}", e, FALLBACK_VERSION);
+                    Ok(FALLBACK_VERSION.to_string())
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to fetch latest version from GitHub: {}, using fallback version {}", e, FALLBACK_VERSION);
+            Ok(FALLBACK_VERSION.to_string())
+        }
+    }
 }
 
 fn get_install_directory() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
