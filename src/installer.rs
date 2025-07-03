@@ -12,6 +12,8 @@ pub enum InstallStatus {
     Downloading(f32), // Progress percentage
     Extracting,
     Completed,
+    Running,
+    Stopped,
     Error(String),
 }
 
