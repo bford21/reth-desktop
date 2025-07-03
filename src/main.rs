@@ -4,7 +4,10 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
 mod installer;
+mod system_check;
+
 use installer::{RethInstaller, InstallStatus};
+use system_check::SystemRequirements;
 
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
@@ -26,6 +29,7 @@ struct MyApp {
     installing: bool,
     _runtime: tokio::runtime::Runtime,
     install_sender: mpsc::UnboundedSender<InstallCommand>,
+    system_requirements: SystemRequirements,
 }
 
 enum InstallCommand {
@@ -63,6 +67,7 @@ impl MyApp {
             installing: false,
             _runtime: runtime,
             install_sender: tx,
+            system_requirements: SystemRequirements::check(),
         }
     }
 
@@ -98,6 +103,51 @@ impl eframe::App for MyApp {
             ui.label("Install Reth Ethereum execution client");
             
             ui.add_space(20.0);
+            
+            // System Requirements Section
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("MinimumSystem Requirements").strong());
+                ui.add_space(10.0);
+                
+                // Disk Space Requirement
+                ui.horizontal(|ui| {
+                    if self.system_requirements.disk_space.meets_requirement {
+                        ui.colored_label(egui::Color32::GREEN, "✓");
+                    } else {
+                        ui.colored_label(egui::Color32::RED, "✗");
+                    }
+                    ui.label(format!(
+                        "Disk Space: {:.1} GB available / {:.0} GB required",
+                        self.system_requirements.disk_space.available_gb,
+                        self.system_requirements.disk_space.required_gb
+                    ));
+                });
+                
+                // Memory Requirement
+                ui.horizontal(|ui| {
+                    if self.system_requirements.memory.meets_requirement {
+                        ui.colored_label(egui::Color32::GREEN, "✓");
+                    } else {
+                        ui.colored_label(egui::Color32::RED, "✗");
+                    }
+                    ui.label(format!(
+                        "Memory: {:.1} GB total / {:.0} GB required",
+                        self.system_requirements.memory.total_gb,
+                        self.system_requirements.memory.required_gb
+                    ));
+                });
+            });
+            
+            ui.add_space(20.0);
+            
+            // Show warning if requirements not met
+            if !self.system_requirements.all_requirements_met() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 165, 0), // Orange
+                    "⚠ Warning: Your system does not meet all requirements. Installation may fail or Reth may not run properly."
+                );
+                ui.add_space(10.0);
+            }
             
             match &self.install_status {
                 InstallStatus::Idle => {
