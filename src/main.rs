@@ -2,324 +2,30 @@ use eframe::egui;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
-use serde::{Deserialize, Serialize};
 
 mod installer;
 mod system_check;
 mod theme;
 mod reth_node;
+mod config;
+mod settings;
+mod ui;
 
 use installer::{RethInstaller, InstallStatus};
 use system_check::SystemRequirements;
 use theme::RethTheme;
 use reth_node::{RethNode, LogLine, LogLevel};
+use config::{RethConfig, RethConfigManager};
+use settings::{DesktopSettings, DesktopSettingsManager};
+use ui::{DesktopSettingsWindow, NodeSettingsWindow};
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct RethConfig {
-    #[serde(default)]
-    stages: StagesConfig,
-    #[serde(default)]
-    peers: PeersConfig,
-    #[serde(default)]
-    sessions: SessionsConfig,
-    #[serde(default)]
-    prune: PruneConfig,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct DesktopSettings {
-    #[serde(default)]
-    keep_reth_running_in_background: bool,
-}
-
-impl Default for DesktopSettings {
-    fn default() -> Self {
-        Self {
-            keep_reth_running_in_background: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct StagesConfig {
-    #[serde(default)]
-    era: Option<EraStageConfig>,
-    #[serde(default)]
-    headers: Option<HeadersStageConfig>,
-    #[serde(default)]
-    bodies: Option<BodiesStageConfig>,
-    #[serde(default)]
-    sender_recovery: Option<SenderRecoveryStageConfig>,
-    #[serde(default)]
-    execution: Option<ExecutionStageConfig>,
-    #[serde(default)]
-    prune: Option<PruneStageConfig>,
-    #[serde(default)]
-    account_hashing: Option<AccountHashingStageConfig>,
-    #[serde(default)]
-    storage_hashing: Option<StorageHashingStageConfig>,
-    #[serde(default)]
-    merkle: Option<MerkleStageConfig>,
-    #[serde(default)]
-    transaction_lookup: Option<TransactionLookupStageConfig>,
-    #[serde(default)]
-    index_account_history: Option<IndexAccountHistoryStageConfig>,
-    #[serde(default)]
-    index_storage_history: Option<IndexStorageHistoryStageConfig>,
-    #[serde(default)]
-    etl: Option<EtlStageConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct EraStageConfig {
-    // Era stage appears to be empty in config
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct HeadersStageConfig {
-    #[serde(default)]
-    downloader_max_concurrent_requests: Option<u32>,
-    #[serde(default)]
-    downloader_min_concurrent_requests: Option<u32>,
-    #[serde(default)]
-    downloader_max_buffered_responses: Option<u32>,
-    #[serde(default)]
-    downloader_request_limit: Option<u32>,
-    #[serde(default)]
-    commit_threshold: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct BodiesStageConfig {
-    #[serde(default)]
-    downloader_request_limit: Option<u32>,
-    #[serde(default)]
-    downloader_stream_batch_size: Option<u32>,
-    #[serde(default)]
-    downloader_max_buffered_blocks_size_bytes: Option<u64>,
-    #[serde(default)]
-    downloader_min_concurrent_requests: Option<u32>,
-    #[serde(default)]
-    downloader_max_concurrent_requests: Option<u32>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct SenderRecoveryStageConfig {
-    #[serde(default)]
-    commit_threshold: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct ExecutionStageConfig {
-    #[serde(default)]
-    max_blocks: Option<u64>,
-    #[serde(default)]
-    max_changes: Option<u64>,
-    #[serde(default)]
-    max_cumulative_gas: Option<u64>,
-    #[serde(default)]
-    max_duration: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct PruneStageConfig {
-    #[serde(default)]
-    commit_threshold: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct AccountHashingStageConfig {
-    #[serde(default)]
-    clean_threshold: Option<u64>,
-    #[serde(default)]
-    commit_threshold: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct StorageHashingStageConfig {
-    #[serde(default)]
-    clean_threshold: Option<u64>,
-    #[serde(default)]
-    commit_threshold: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct MerkleStageConfig {
-    #[serde(default)]
-    incremental_threshold: Option<u64>,
-    #[serde(default)]
-    rebuild_threshold: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct TransactionLookupStageConfig {
-    #[serde(default)]
-    chunk_size: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct IndexAccountHistoryStageConfig {
-    #[serde(default)]
-    commit_threshold: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct IndexStorageHistoryStageConfig {
-    #[serde(default)]
-    commit_threshold: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct EtlStageConfig {
-    #[serde(default)]
-    file_size: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct PeersConfig {
-    #[serde(default)]
-    refill_slots_interval: Option<String>,
-    #[serde(default)]
-    trusted_nodes: Option<Vec<String>>,
-    #[serde(default)]
-    trusted_nodes_only: Option<bool>,
-    #[serde(default)]
-    trusted_nodes_resolution_interval: Option<String>,
-    #[serde(default)]
-    max_backoff_count: Option<u32>,
-    #[serde(default)]
-    ban_duration: Option<String>,
-    #[serde(default)]
-    incoming_ip_throttle_duration: Option<String>,
-    #[serde(default)]
-    connection_info: Option<ConnectionInfoConfig>,
-    #[serde(default)]
-    reputation_weights: Option<ReputationWeightsConfig>,
-    #[serde(default)]
-    backoff_durations: Option<BackoffDurationsConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct ConnectionInfoConfig {
-    #[serde(default)]
-    max_outbound: Option<u32>,
-    #[serde(default)]
-    max_inbound: Option<u32>,
-    #[serde(default)]
-    max_concurrent_outbound_dials: Option<u32>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct ReputationWeightsConfig {
-    #[serde(default)]
-    bad_message: Option<i32>,
-    #[serde(default)]
-    bad_block: Option<i32>,
-    #[serde(default)]
-    bad_transactions: Option<i32>,
-    #[serde(default)]
-    already_seen_transactions: Option<i32>,
-    #[serde(default)]
-    timeout: Option<i32>,
-    #[serde(default)]
-    bad_protocol: Option<i32>,
-    #[serde(default)]
-    failed_to_connect: Option<i32>,
-    #[serde(default)]
-    dropped: Option<i32>,
-    #[serde(default)]
-    bad_announcement: Option<i32>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct BackoffDurationsConfig {
-    #[serde(default)]
-    low: Option<String>,
-    #[serde(default)]
-    medium: Option<String>,
-    #[serde(default)]
-    high: Option<String>,
-    #[serde(default)]
-    max: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct SessionsConfig {
-    #[serde(default)]
-    session_command_buffer: Option<u32>,
-    #[serde(default)]
-    session_event_buffer: Option<u32>,
-    #[serde(default)]
-    limits: Option<SessionLimitsConfig>,
-    #[serde(default)]
-    initial_internal_request_timeout: Option<TimeoutConfig>,
-    #[serde(default)]
-    protocol_breach_request_timeout: Option<TimeoutConfig>,
-    #[serde(default)]
-    pending_session_timeout: Option<TimeoutConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct SessionLimitsConfig {
-    // This appears to be empty in your config
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct TimeoutConfig {
-    #[serde(default)]
-    secs: Option<u64>,
-    #[serde(default)]
-    nanos: Option<u32>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct PruneConfig {
-    #[serde(default)]
-    block_interval: Option<u64>,
-    #[serde(default)]
-    segments: Option<PruneSegments>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct PruneSegments {
-    #[serde(default)]
-    sender_recovery: Option<String>,
-    #[serde(default)]
-    receipts: Option<PruneReceiptsConfig>,
-    #[serde(default)]
-    account_history: Option<PruneHistoryConfig>,
-    #[serde(default)]
-    storage_history: Option<PruneHistoryConfig>,
-    #[serde(default)]
-    receipts_log_filter: Option<PruneReceiptsLogFilterConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct PruneReceiptsConfig {
-    #[serde(default)]
-    distance: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct PruneHistoryConfig {
-    #[serde(default)]
-    distance: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct PruneReceiptsLogFilterConfig {
-    // This appears to be empty in your config
-}
-
-fn default_max_peers() -> u32 { 50 }
-fn default_min_peers() -> u32 { 1 }
 
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
             .with_min_inner_size([800.0, 600.0])
-            .with_title("Reth Desktop Installer"),
+            .with_title("Reth Desktop"),
         ..Default::default()
     };
     
@@ -343,6 +49,7 @@ struct MyApp {
     node_logs: Vec<LogLine>,
     is_reth_installed: bool,
     was_detected_on_startup: bool,
+    detected_existing_process: bool,
     installed_version: Option<String>,
     latest_version: Option<String>,
     update_available: bool,
@@ -354,6 +61,7 @@ struct MyApp {
     editable_config: RethConfig,
     config_modified: bool,
     settings_edit_mode: bool,
+    last_debug_log: std::time::Instant,
 }
 
 enum InstallCommand {
@@ -375,10 +83,10 @@ impl MyApp {
         let installed_version = Self::get_installed_version();
         
         // Load Reth configuration
-        let (reth_config, reth_config_path) = Self::load_reth_config();
+        let (reth_config, reth_config_path) = RethConfigManager::load_reth_config();
         
         // Load desktop settings
-        let desktop_settings = Self::load_desktop_settings();
+        let desktop_settings = DesktopSettingsManager::load_desktop_settings();
         
         // Spawn a task to handle installation commands
         runtime.spawn(async move {
@@ -422,6 +130,21 @@ impl MyApp {
             InstallStatus::Idle
         };
         
+        // Create RethNode and check for existing processes
+        let mut reth_node = RethNode::new();
+        let detect_existing = RethNode::detect_existing_reth_process();
+        
+        println!("Startup: Reth installed: {}, External process detected: {}", is_reth_installed, detect_existing);
+        
+        // If Reth is running, try to connect to it
+        if detect_existing {
+            if let Ok(()) = reth_node.connect_to_existing_process() {
+                println!("Found and connected to existing Reth process");
+            } else {
+                println!("Failed to connect to detected Reth process");
+            }
+        }
+        
         Self {
             installer: Arc::new(Mutex::new(RethInstaller::new())),
             install_status: initial_status,
@@ -431,10 +154,11 @@ impl MyApp {
             update_receiver: update_rx,
             system_requirements: SystemRequirements::check(),
             reth_logo,
-            reth_node: RethNode::new(),
+            reth_node,
             node_logs: Vec::new(),
             is_reth_installed,
             was_detected_on_startup: is_reth_installed,
+            detected_existing_process: detect_existing,
             installed_version,
             latest_version: None,
             update_available: false,
@@ -446,6 +170,7 @@ impl MyApp {
             editable_config: reth_config,
             config_modified: false,
             settings_edit_mode: false,
+            last_debug_log: std::time::Instant::now(),
         }
     }
     
@@ -536,138 +261,6 @@ impl MyApp {
         }
         
         None
-    }
-    
-    fn get_reth_data_dir() -> std::path::PathBuf {
-        // Get platform-specific Reth data directory
-        #[cfg(target_os = "macos")]
-        {
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join("Library")
-                .join("Application Support")
-                .join("reth")
-        }
-        
-        #[cfg(target_os = "linux")]
-        {
-            // Try XDG_DATA_HOME first, fallback to ~/.local/share/reth
-            if let Some(xdg_data) = std::env::var_os("XDG_DATA_HOME") {
-                std::path::PathBuf::from(xdg_data).join("reth")
-            } else {
-                dirs::home_dir()
-                    .unwrap_or_default()
-                    .join(".local")
-                    .join("share")
-                    .join("reth")
-            }
-        }
-        
-        #[cfg(target_os = "windows")]
-        {
-            dirs::data_dir()
-                .unwrap_or_default()
-                .join("reth")
-        }
-        
-        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-        {
-            // Fallback for unsupported platforms
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(".reth")
-        }
-    }
-    
-    fn load_reth_config() -> (RethConfig, Option<std::path::PathBuf>) {
-        let reth_data_dir = Self::get_reth_data_dir();
-        
-        // Try different possible config locations
-        let possible_paths = [
-            reth_data_dir.join("mainnet").join("reth.toml"),  // Network-specific (mainnet)
-            reth_data_dir.join("reth.toml"),                  // Root directory
-            reth_data_dir.join("goerli").join("reth.toml"),   // Other networks
-            reth_data_dir.join("sepolia").join("reth.toml"),
-        ];
-        
-        for config_path in &possible_paths {
-            match std::fs::read_to_string(config_path) {
-                Ok(content) => {
-                    match toml::from_str::<RethConfig>(&content) {
-                        Ok(config) => {
-                            println!("Loaded Reth configuration from: {}", config_path.display());
-                            return (config, Some(config_path.clone()));
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to parse reth.toml at {}: {}", config_path.display(), e);
-                            continue;
-                        }
-                    }
-                }
-                Err(_) => continue,
-            }
-        }
-        
-        println!("No reth.toml found in any expected location, using defaults");
-        println!("Searched locations:");
-        for path in &possible_paths {
-            println!("  - {}", path.display());
-        }
-        (RethConfig::default(), None)
-    }
-    
-    fn get_settings_file_path() -> std::path::PathBuf {
-        // Place settings.toml in the same directory as the reth binary
-        dirs::home_dir()
-            .unwrap_or_default()
-            .join(".reth-desktop")
-            .join("settings.toml")
-    }
-    
-    fn load_desktop_settings() -> DesktopSettings {
-        let settings_path = Self::get_settings_file_path();
-        
-        match std::fs::read_to_string(&settings_path) {
-            Ok(content) => {
-                match toml::from_str::<DesktopSettings>(&content) {
-                    Ok(settings) => {
-                        println!("Loaded desktop settings from: {}", settings_path.display());
-                        settings
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to parse settings.toml: {}, using defaults", e);
-                        DesktopSettings::default()
-                    }
-                }
-            }
-            Err(_) => {
-                println!("No settings.toml found, creating with defaults at: {}", settings_path.display());
-                let default_settings = DesktopSettings::default();
-                // Try to create the settings file with defaults
-                if let Err(e) = Self::save_desktop_settings_static(&default_settings) {
-                    eprintln!("Failed to create default settings.toml: {}", e);
-                }
-                default_settings
-            }
-        }
-    }
-    
-    fn save_desktop_settings(&self) -> Result<(), Box<dyn std::error::Error>> {
-        Self::save_desktop_settings_static(&self.desktop_settings)
-    }
-    
-    fn save_desktop_settings_static(settings: &DesktopSettings) -> Result<(), Box<dyn std::error::Error>> {
-        let settings_path = Self::get_settings_file_path();
-        
-        // Create the directory if it doesn't exist
-        if let Some(parent) = settings_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        
-        let toml_string = toml::to_string_pretty(settings)?;
-        std::fs::write(&settings_path, toml_string)?;
-        println!("Saved desktop settings to: {}", settings_path.display());
-        Ok(())
     }
     
     async fn check_for_updates(&mut self) {
@@ -908,1109 +501,17 @@ impl MyApp {
         self.config_modified = false;
         // Don't reset edit mode here - let the caller decide
     }
-    
-    fn editable_u32_field(ui: &mut egui::Ui, label: &str, value: &mut Option<u32>) -> bool {
-        let mut changed = false;
-        ui.horizontal(|ui| {
-            ui.label(format!("{}:", label));
-            let mut text = value.map_or_else(String::new, |v| v.to_string());
-            if ui.add_sized([150.0, 20.0], egui::TextEdit::singleline(&mut text)).changed() {
-                if text.is_empty() {
-                    *value = None;
-                } else if let Ok(parsed) = text.parse::<u32>() {
-                    *value = Some(parsed);
-                }
-                changed = true;
-            }
-        });
-        changed
+
+    fn disconnect_from_external_reth(&mut self) {
+        // Disconnect from monitoring external Reth process
+        if let Err(e) = self.reth_node.stop() {
+            eprintln!("Error disconnecting from external Reth process: {}", e);
+        }
+        // Clear logs and reset state
+        self.node_logs.clear();
     }
     
-    fn editable_u64_field(ui: &mut egui::Ui, label: &str, value: &mut Option<u64>) -> bool {
-        let mut changed = false;
-        ui.horizontal(|ui| {
-            ui.label(format!("{}:", label));
-            let mut text = value.map_or_else(String::new, |v| v.to_string());
-            if ui.add_sized([150.0, 20.0], egui::TextEdit::singleline(&mut text)).changed() {
-                if text.is_empty() {
-                    *value = None;
-                } else if let Ok(parsed) = text.parse::<u64>() {
-                    *value = Some(parsed);
-                }
-                changed = true;
-            }
-        });
-        changed
-    }
-    
-    fn editable_string_field(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) -> bool {
-        let mut changed = false;
-        ui.horizontal(|ui| {
-            ui.label(format!("{}:", label));
-            let mut text = value.as_ref().map_or_else(String::new, |v| v.clone());
-            if ui.add_sized([150.0, 20.0], egui::TextEdit::singleline(&mut text)).changed() {
-                if text.is_empty() {
-                    *value = None;
-                } else {
-                    *value = Some(text);
-                }
-                changed = true;
-            }
-        });
-        changed
-    }
-    
-    fn editable_bool_field(ui: &mut egui::Ui, label: &str, value: &mut Option<bool>) -> bool {
-        let mut changed = false;
-        ui.horizontal(|ui| {
-            ui.label(format!("{}:", label));
-            let mut checkbox_value = value.unwrap_or(false);
-            if ui.checkbox(&mut checkbox_value, "").changed() {
-                *value = Some(checkbox_value);
-                changed = true;
-            }
-        });
-        changed
-    }
-    
-    fn editable_i32_field(ui: &mut egui::Ui, label: &str, value: &mut Option<i32>) -> bool {
-        let mut changed = false;
-        ui.horizontal(|ui| {
-            ui.label(format!("{}:", label));
-            let mut text = value.map_or_else(String::new, |v| v.to_string());
-            if ui.add_sized([150.0, 20.0], egui::TextEdit::singleline(&mut text)).changed() {
-                if text.is_empty() {
-                    *value = None;
-                } else if let Ok(parsed) = text.parse::<i32>() {
-                    *value = Some(parsed);
-                }
-                changed = true;
-            }
-        });
-        changed
-    }
-    
-    fn show_desktop_settings_content(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.add_space(8.0);
-            
-            // Background running setting
-            ui.horizontal(|ui| {
-                ui.label("Keep Reth running in the background:");
-                if ui.checkbox(&mut self.desktop_settings.keep_reth_running_in_background, "").changed() {
-                    // Save settings when changed
-                    if let Err(e) = self.save_desktop_settings() {
-                        eprintln!("Failed to save desktop settings: {}", e);
-                    }
-                }
-            });
-            
-            ui.add_space(8.0);
-            ui.label(RethTheme::muted_text("When enabled, Reth will continue running even when the application window is closed."));
-        });
-    }
-    
-    fn show_settings_content(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.add_space(8.0);
-            
-            // Config file path
-            let reth_data_dir = Self::get_reth_data_dir();
-            if let Some(config_path) = &self.reth_config_path {
-                ui.label(RethTheme::muted_text(&format!("Configuration file: {}", config_path.display())));
-            } else {
-                ui.label(RethTheme::muted_text("Configuration file: Not found (using defaults)"));
-            }
-            ui.label(RethTheme::muted_text(&format!("Reth data directory: {}", reth_data_dir.display())));
-            ui.add_space(12.0);
-            
-            // Edit mode toggle
-            ui.horizontal(|ui| {
-                if !self.settings_edit_mode {
-                    if ui.button("🖊 Edit").clicked() {
-                        self.settings_edit_mode = true;
-                        self.reset_editable_config(); // Reset to ensure clean state
-                    }
-                } else {
-                    if ui.button("👁 View Mode").clicked() {
-                        self.settings_edit_mode = false;
-                        self.reset_editable_config();
-                    }
-                    ui.add_space(8.0);
-                    ui.label(RethTheme::success_text("✏ Edit mode active - you can modify configuration values"));
-                }
-            });
-            ui.add_space(16.0);
-            
-            // Stages Configuration
-            ui.collapsing("Stages Configuration", |ui| {
-                // Era Stage
-                if self.reth_config.stages.era.is_some() {
-                    ui.label("Era Stage: Configured");
-                }
-                
-                // Headers Stage
-                if self.settings_edit_mode {
-                    if let Some(headers) = &mut self.editable_config.stages.headers {
-                        ui.label("Headers Stage:");
-                        ui.indent("headers", |ui| {
-                            if Self::editable_u32_field(ui, "Max Concurrent Requests", &mut headers.downloader_max_concurrent_requests) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_u32_field(ui, "Min Concurrent Requests", &mut headers.downloader_min_concurrent_requests) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_u32_field(ui, "Max Buffered Responses", &mut headers.downloader_max_buffered_responses) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_u32_field(ui, "Request Limit", &mut headers.downloader_request_limit) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_u64_field(ui, "Commit Threshold", &mut headers.commit_threshold) {
-                                self.config_modified = true;
-                            }
-                        });
-                        ui.add_space(8.0);
-                    } else {
-                        if ui.button("+ Add Headers Stage").clicked() {
-                            self.editable_config.stages.headers = Some(HeadersStageConfig::default());
-                            self.config_modified = true;
-                        }
-                        ui.add_space(8.0);
-                    }
-                } else {
-                    // Read-only view
-                    if let Some(headers) = &self.reth_config.stages.headers {
-                        ui.label("Headers Stage:");
-                        ui.indent("headers_readonly", |ui| {
-                            if let Some(val) = headers.downloader_max_concurrent_requests {
-                                ui.label(&format!("Max Concurrent Requests: {}", val));
-                            }
-                            if let Some(val) = headers.downloader_min_concurrent_requests {
-                                ui.label(&format!("Min Concurrent Requests: {}", val));
-                            }
-                            if let Some(val) = headers.downloader_max_buffered_responses {
-                                ui.label(&format!("Max Buffered Responses: {}", val));
-                            }
-                            if let Some(val) = headers.downloader_request_limit {
-                                ui.label(&format!("Request Limit: {}", val));
-                            }
-                            if let Some(val) = headers.commit_threshold {
-                                ui.label(&format!("Commit Threshold: {}", val));
-                            }
-                        });
-                        ui.add_space(8.0);
-                    }
-                }
-                
-                // Bodies Stage
-                if self.settings_edit_mode {
-                    if let Some(bodies) = &mut self.editable_config.stages.bodies {
-                        ui.label("Bodies Stage:");
-                        ui.indent("bodies", |ui| {
-                            if Self::editable_u32_field(ui, "Request Limit", &mut bodies.downloader_request_limit) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_u32_field(ui, "Stream Batch Size", &mut bodies.downloader_stream_batch_size) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_u64_field(ui, "Max Buffered Blocks Size (bytes)", &mut bodies.downloader_max_buffered_blocks_size_bytes) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_u32_field(ui, "Min Concurrent Requests", &mut bodies.downloader_min_concurrent_requests) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_u32_field(ui, "Max Concurrent Requests", &mut bodies.downloader_max_concurrent_requests) {
-                                self.config_modified = true;
-                            }
-                        });
-                        ui.add_space(8.0);
-                    } else {
-                        if ui.button("+ Add Bodies Stage").clicked() {
-                            self.editable_config.stages.bodies = Some(BodiesStageConfig::default());
-                            self.config_modified = true;
-                        }
-                        ui.add_space(8.0);
-                    }
-                } else {
-                    if let Some(bodies) = &self.reth_config.stages.bodies {
-                        ui.label("Bodies Stage:");
-                        ui.indent("bodies_readonly", |ui| {
-                            if let Some(val) = bodies.downloader_request_limit {
-                                ui.label(&format!("Request Limit: {}", val));
-                            }
-                            if let Some(val) = bodies.downloader_stream_batch_size {
-                                ui.label(&format!("Stream Batch Size: {}", val));
-                            }
-                            if let Some(val) = bodies.downloader_max_buffered_blocks_size_bytes {
-                                ui.label(&format!("Max Buffered Blocks Size: {} bytes", val));
-                            }
-                            if let Some(val) = bodies.downloader_min_concurrent_requests {
-                                ui.label(&format!("Min Concurrent Requests: {}", val));
-                            }
-                            if let Some(val) = bodies.downloader_max_concurrent_requests {
-                                ui.label(&format!("Max Concurrent Requests: {}", val));
-                            }
-                        });
-                        ui.add_space(8.0);
-                    }
-                }
-                
-                // Sender Recovery Stage
-                if self.settings_edit_mode {
-                    if let Some(sender_recovery) = &mut self.editable_config.stages.sender_recovery {
-                        ui.label("Sender Recovery Stage:");
-                        ui.indent("sender_recovery", |ui| {
-                            if Self::editable_u64_field(ui, "Commit Threshold", &mut sender_recovery.commit_threshold) {
-                                self.config_modified = true;
-                            }
-                        });
-                        ui.add_space(8.0);
-                    } else {
-                        if ui.button("+ Add Sender Recovery Stage").clicked() {
-                            self.editable_config.stages.sender_recovery = Some(SenderRecoveryStageConfig::default());
-                            self.config_modified = true;
-                        }
-                        ui.add_space(8.0);
-                    }
-                } else {
-                    if let Some(sender_recovery) = &self.reth_config.stages.sender_recovery {
-                        ui.label("Sender Recovery Stage:");
-                        ui.indent("sender_recovery_readonly", |ui| {
-                            if let Some(val) = sender_recovery.commit_threshold {
-                                ui.label(&format!("Commit Threshold: {}", val));
-                            }
-                        });
-                        ui.add_space(8.0);
-                    }
-                }
-                
-                // Execution Stage
-                if self.settings_edit_mode {
-                    if let Some(execution) = &mut self.editable_config.stages.execution {
-                        ui.label("Execution Stage:");
-                        ui.indent("execution", |ui| {
-                            if Self::editable_u64_field(ui, "Max Blocks", &mut execution.max_blocks) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_u64_field(ui, "Max Changes", &mut execution.max_changes) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_u64_field(ui, "Max Cumulative Gas", &mut execution.max_cumulative_gas) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_string_field(ui, "Max Duration", &mut execution.max_duration) {
-                                self.config_modified = true;
-                            }
-                        });
-                        ui.add_space(8.0);
-                    } else {
-                        if ui.button("+ Add Execution Stage").clicked() {
-                            self.editable_config.stages.execution = Some(ExecutionStageConfig::default());
-                            self.config_modified = true;
-                        }
-                        ui.add_space(8.0);
-                    }
-                } else {
-                    if let Some(execution) = &self.reth_config.stages.execution {
-                        ui.label("Execution Stage:");
-                        ui.indent("execution_readonly", |ui| {
-                            if let Some(val) = execution.max_blocks {
-                                ui.label(&format!("Max Blocks: {}", val));
-                            }
-                            if let Some(val) = execution.max_changes {
-                                ui.label(&format!("Max Changes: {}", val));
-                            }
-                            if let Some(val) = execution.max_cumulative_gas {
-                                ui.label(&format!("Max Cumulative Gas: {}", val));
-                            }
-                            if let Some(val) = &execution.max_duration {
-                                ui.label(&format!("Max Duration: {}", val));
-                            }
-                        });
-                        ui.add_space(8.0);
-                    }
-                }
-                
-                // Prune Stage
-                if self.settings_edit_mode {
-                    if let Some(prune_stage) = &mut self.editable_config.stages.prune {
-                        ui.label("Prune Stage:");
-                        ui.indent("prune_stage", |ui| {
-                            if Self::editable_u64_field(ui, "Commit Threshold", &mut prune_stage.commit_threshold) {
-                                self.config_modified = true;
-                            }
-                        });
-                        ui.add_space(8.0);
-                    } else {
-                        if ui.button("+ Add Prune Stage").clicked() {
-                            self.editable_config.stages.prune = Some(PruneStageConfig::default());
-                            self.config_modified = true;
-                        }
-                        ui.add_space(8.0);
-                    }
-                } else {
-                    if let Some(prune_stage) = &self.reth_config.stages.prune {
-                        ui.label("Prune Stage:");
-                        ui.indent("prune_stage_readonly", |ui| {
-                            if let Some(val) = prune_stage.commit_threshold {
-                                ui.label(&format!("Commit Threshold: {}", val));
-                            }
-                        });
-                        ui.add_space(8.0);
-                    }
-                }
-                
-                // Account Hashing Stage
-                if self.settings_edit_mode {
-                    if let Some(account_hashing) = &mut self.editable_config.stages.account_hashing {
-                        ui.label("Account Hashing Stage:");
-                        ui.indent("account_hashing", |ui| {
-                            if Self::editable_u64_field(ui, "Clean Threshold", &mut account_hashing.clean_threshold) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_u64_field(ui, "Commit Threshold", &mut account_hashing.commit_threshold) {
-                                self.config_modified = true;
-                            }
-                        });
-                        ui.add_space(8.0);
-                    } else {
-                        if ui.button("+ Add Account Hashing Stage").clicked() {
-                            self.editable_config.stages.account_hashing = Some(AccountHashingStageConfig::default());
-                            self.config_modified = true;
-                        }
-                        ui.add_space(8.0);
-                    }
-                } else {
-                    if let Some(account_hashing) = &self.reth_config.stages.account_hashing {
-                        ui.label("Account Hashing Stage:");
-                        ui.indent("account_hashing_readonly", |ui| {
-                            if let Some(val) = account_hashing.clean_threshold {
-                                ui.label(&format!("Clean Threshold: {}", val));
-                            }
-                            if let Some(val) = account_hashing.commit_threshold {
-                                ui.label(&format!("Commit Threshold: {}", val));
-                            }
-                        });
-                        ui.add_space(8.0);
-                    }
-                }
-                
-                // Storage Hashing Stage
-                if self.settings_edit_mode {
-                    if let Some(storage_hashing) = &mut self.editable_config.stages.storage_hashing {
-                        ui.label("Storage Hashing Stage:");
-                        ui.indent("storage_hashing", |ui| {
-                            if Self::editable_u64_field(ui, "Clean Threshold", &mut storage_hashing.clean_threshold) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_u64_field(ui, "Commit Threshold", &mut storage_hashing.commit_threshold) {
-                                self.config_modified = true;
-                            }
-                        });
-                        ui.add_space(8.0);
-                    } else {
-                        if ui.button("+ Add Storage Hashing Stage").clicked() {
-                            self.editable_config.stages.storage_hashing = Some(StorageHashingStageConfig::default());
-                            self.config_modified = true;
-                        }
-                        ui.add_space(8.0);
-                    }
-                } else {
-                    if let Some(storage_hashing) = &self.reth_config.stages.storage_hashing {
-                        ui.label("Storage Hashing Stage:");
-                        ui.indent("storage_hashing_readonly", |ui| {
-                            if let Some(val) = storage_hashing.clean_threshold {
-                                ui.label(&format!("Clean Threshold: {}", val));
-                            }
-                            if let Some(val) = storage_hashing.commit_threshold {
-                                ui.label(&format!("Commit Threshold: {}", val));
-                            }
-                        });
-                        ui.add_space(8.0);
-                    }
-                }
-                
-                // Merkle Stage
-                if self.settings_edit_mode {
-                    if let Some(merkle) = &mut self.editable_config.stages.merkle {
-                        ui.label("Merkle Stage:");
-                        ui.indent("merkle", |ui| {
-                            if Self::editable_u64_field(ui, "Incremental Threshold", &mut merkle.incremental_threshold) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_u64_field(ui, "Rebuild Threshold", &mut merkle.rebuild_threshold) {
-                                self.config_modified = true;
-                            }
-                        });
-                        ui.add_space(8.0);
-                    } else {
-                        if ui.button("+ Add Merkle Stage").clicked() {
-                            self.editable_config.stages.merkle = Some(MerkleStageConfig::default());
-                            self.config_modified = true;
-                        }
-                        ui.add_space(8.0);
-                    }
-                } else {
-                    if let Some(merkle) = &self.reth_config.stages.merkle {
-                        ui.label("Merkle Stage:");
-                        ui.indent("merkle_readonly", |ui| {
-                            if let Some(val) = merkle.incremental_threshold {
-                                ui.label(&format!("Incremental Threshold: {}", val));
-                            }
-                            if let Some(val) = merkle.rebuild_threshold {
-                                ui.label(&format!("Rebuild Threshold: {}", val));
-                            }
-                        });
-                        ui.add_space(8.0);
-                    }
-                }
-                
-                // Transaction Lookup Stage
-                if self.settings_edit_mode {
-                    if let Some(tx_lookup) = &mut self.editable_config.stages.transaction_lookup {
-                        ui.label("Transaction Lookup Stage:");
-                        ui.indent("transaction_lookup", |ui| {
-                            if Self::editable_u64_field(ui, "Chunk Size", &mut tx_lookup.chunk_size) {
-                                self.config_modified = true;
-                            }
-                        });
-                        ui.add_space(8.0);
-                    } else {
-                        if ui.button("+ Add Transaction Lookup Stage").clicked() {
-                            self.editable_config.stages.transaction_lookup = Some(TransactionLookupStageConfig::default());
-                            self.config_modified = true;
-                        }
-                        ui.add_space(8.0);
-                    }
-                } else {
-                    if let Some(tx_lookup) = &self.reth_config.stages.transaction_lookup {
-                        ui.label("Transaction Lookup Stage:");
-                        ui.indent("transaction_lookup_readonly", |ui| {
-                            if let Some(val) = tx_lookup.chunk_size {
-                                ui.label(&format!("Chunk Size: {}", val));
-                            }
-                        });
-                        ui.add_space(8.0);
-                    }
-                }
-                
-                // Index Account History Stage
-                if self.settings_edit_mode {
-                    if let Some(index_account) = &mut self.editable_config.stages.index_account_history {
-                        ui.label("Index Account History Stage:");
-                        ui.indent("index_account_history", |ui| {
-                            if Self::editable_u64_field(ui, "Commit Threshold", &mut index_account.commit_threshold) {
-                                self.config_modified = true;
-                            }
-                        });
-                        ui.add_space(8.0);
-                    } else {
-                        if ui.button("+ Add Index Account History Stage").clicked() {
-                            self.editable_config.stages.index_account_history = Some(IndexAccountHistoryStageConfig::default());
-                            self.config_modified = true;
-                        }
-                        ui.add_space(8.0);
-                    }
-                } else {
-                    if let Some(index_account) = &self.reth_config.stages.index_account_history {
-                        ui.label("Index Account History Stage:");
-                        ui.indent("index_account_history_readonly", |ui| {
-                            if let Some(val) = index_account.commit_threshold {
-                                ui.label(&format!("Commit Threshold: {}", val));
-                            }
-                        });
-                        ui.add_space(8.0);
-                    }
-                }
-                
-                // Index Storage History Stage
-                if self.settings_edit_mode {
-                    if let Some(index_storage) = &mut self.editable_config.stages.index_storage_history {
-                        ui.label("Index Storage History Stage:");
-                        ui.indent("index_storage_history", |ui| {
-                            if Self::editable_u64_field(ui, "Commit Threshold", &mut index_storage.commit_threshold) {
-                                self.config_modified = true;
-                            }
-                        });
-                        ui.add_space(8.0);
-                    } else {
-                        if ui.button("+ Add Index Storage History Stage").clicked() {
-                            self.editable_config.stages.index_storage_history = Some(IndexStorageHistoryStageConfig::default());
-                            self.config_modified = true;
-                        }
-                        ui.add_space(8.0);
-                    }
-                } else {
-                    if let Some(index_storage) = &self.reth_config.stages.index_storage_history {
-                        ui.label("Index Storage History Stage:");
-                        ui.indent("index_storage_history_readonly", |ui| {
-                            if let Some(val) = index_storage.commit_threshold {
-                                ui.label(&format!("Commit Threshold: {}", val));
-                            }
-                        });
-                        ui.add_space(8.0);
-                    }
-                }
-                
-                // ETL Stage
-                if self.settings_edit_mode {
-                    if let Some(etl) = &mut self.editable_config.stages.etl {
-                        ui.label("ETL Stage:");
-                        ui.indent("etl", |ui| {
-                            if Self::editable_u64_field(ui, "File Size (bytes)", &mut etl.file_size) {
-                                self.config_modified = true;
-                            }
-                        });
-                        ui.add_space(8.0);
-                    } else {
-                        if ui.button("+ Add ETL Stage").clicked() {
-                            self.editable_config.stages.etl = Some(EtlStageConfig::default());
-                            self.config_modified = true;
-                        }
-                        ui.add_space(8.0);
-                    }
-                } else {
-                    if let Some(etl) = &self.reth_config.stages.etl {
-                        ui.label("ETL Stage:");
-                        ui.indent("etl_readonly", |ui| {
-                            if let Some(val) = etl.file_size {
-                                ui.label(&format!("File Size: {} bytes", val));
-                            }
-                        });
-                        ui.add_space(8.0);
-                    }
-                }
-            });
-            
-            ui.add_space(12.0);
-            
-            // Peers Configuration
-            ui.collapsing("Peers Configuration", |ui| {
-                if self.settings_edit_mode {
-                    // Basic peer settings
-                    if Self::editable_string_field(ui, "Refill Slots Interval", &mut self.editable_config.peers.refill_slots_interval) {
-                        self.config_modified = true;
-                    }
-                    
-                    // TODO: Handle trusted_nodes array editing (skip for now as it's complex)
-                    if let Some(trusted_nodes) = &self.editable_config.peers.trusted_nodes {
-                        ui.label(&format!("Trusted Nodes: {} configured", trusted_nodes.len()));
-                    }
-                    
-                    if Self::editable_bool_field(ui, "Trusted Nodes Only", &mut self.editable_config.peers.trusted_nodes_only) {
-                        self.config_modified = true;
-                    }
-                    
-                    if Self::editable_string_field(ui, "Trusted Nodes Resolution Interval", &mut self.editable_config.peers.trusted_nodes_resolution_interval) {
-                        self.config_modified = true;
-                    }
-                    
-                    if Self::editable_u32_field(ui, "Max Backoff Count", &mut self.editable_config.peers.max_backoff_count) {
-                        self.config_modified = true;
-                    }
-                    
-                    if Self::editable_string_field(ui, "Ban Duration", &mut self.editable_config.peers.ban_duration) {
-                        self.config_modified = true;
-                    }
-                    
-                    if Self::editable_string_field(ui, "Incoming IP Throttle Duration", &mut self.editable_config.peers.incoming_ip_throttle_duration) {
-                        self.config_modified = true;
-                    }
-                    
-                    ui.add_space(8.0);
-                    
-                    // Connection Info
-                    ui.label("Connection Info:");
-                    if let Some(conn_info) = &mut self.editable_config.peers.connection_info {
-                        ui.indent("connection_info", |ui| {
-                            if Self::editable_u32_field(ui, "Max Outbound", &mut conn_info.max_outbound) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_u32_field(ui, "Max Inbound", &mut conn_info.max_inbound) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_u32_field(ui, "Max Concurrent Outbound Dials", &mut conn_info.max_concurrent_outbound_dials) {
-                                self.config_modified = true;
-                            }
-                        });
-                    } else {
-                        if ui.button("+ Add Connection Info").clicked() {
-                            self.editable_config.peers.connection_info = Some(ConnectionInfoConfig::default());
-                            self.config_modified = true;
-                        }
-                    }
-                    
-                    ui.add_space(8.0);
-                    
-                    // Reputation Weights
-                    ui.label("Reputation Weights:");
-                    if let Some(rep_weights) = &mut self.editable_config.peers.reputation_weights {
-                        ui.indent("reputation_weights", |ui| {
-                            if Self::editable_i32_field(ui, "Bad Message", &mut rep_weights.bad_message) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_i32_field(ui, "Bad Block", &mut rep_weights.bad_block) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_i32_field(ui, "Bad Transactions", &mut rep_weights.bad_transactions) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_i32_field(ui, "Already Seen Transactions", &mut rep_weights.already_seen_transactions) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_i32_field(ui, "Timeout", &mut rep_weights.timeout) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_i32_field(ui, "Bad Protocol", &mut rep_weights.bad_protocol) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_i32_field(ui, "Failed to Connect", &mut rep_weights.failed_to_connect) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_i32_field(ui, "Dropped", &mut rep_weights.dropped) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_i32_field(ui, "Bad Announcement", &mut rep_weights.bad_announcement) {
-                                self.config_modified = true;
-                            }
-                        });
-                    } else {
-                        if ui.button("+ Add Reputation Weights").clicked() {
-                            self.editable_config.peers.reputation_weights = Some(ReputationWeightsConfig::default());
-                            self.config_modified = true;
-                        }
-                    }
-                    
-                    ui.add_space(8.0);
-                    
-                    // Backoff Durations
-                    ui.label("Backoff Durations:");
-                    if let Some(backoff) = &mut self.editable_config.peers.backoff_durations {
-                        ui.indent("backoff_durations", |ui| {
-                            if Self::editable_string_field(ui, "Low", &mut backoff.low) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_string_field(ui, "Medium", &mut backoff.medium) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_string_field(ui, "High", &mut backoff.high) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_string_field(ui, "Max", &mut backoff.max) {
-                                self.config_modified = true;
-                            }
-                        });
-                    } else {
-                        if ui.button("+ Add Backoff Durations").clicked() {
-                            self.editable_config.peers.backoff_durations = Some(BackoffDurationsConfig::default());
-                            self.config_modified = true;
-                        }
-                    }
-                } else {
-                    // Read-only view
-                    if let Some(val) = &self.reth_config.peers.refill_slots_interval {
-                        ui.label(&format!("Refill Slots Interval: {}", val));
-                    }
-                    if let Some(val) = &self.reth_config.peers.trusted_nodes {
-                        ui.label(&format!("Trusted Nodes: {} configured", val.len()));
-                        if val.is_empty() {
-                            ui.label("  (Empty list)");
-                        }
-                    }
-                    if let Some(val) = self.reth_config.peers.trusted_nodes_only {
-                        ui.label(&format!("Trusted Nodes Only: {}", val));
-                    }
-                    if let Some(val) = &self.reth_config.peers.trusted_nodes_resolution_interval {
-                        ui.label(&format!("Trusted Nodes Resolution Interval: {}", val));
-                    }
-                    if let Some(val) = self.reth_config.peers.max_backoff_count {
-                        ui.label(&format!("Max Backoff Count: {}", val));
-                    }
-                    if let Some(val) = &self.reth_config.peers.ban_duration {
-                        ui.label(&format!("Ban Duration: {}", val));
-                    }
-                    if let Some(val) = &self.reth_config.peers.incoming_ip_throttle_duration {
-                        ui.label(&format!("Incoming IP Throttle Duration: {}", val));
-                    }
-                    
-                    // Connection Info
-                    if let Some(conn_info) = &self.reth_config.peers.connection_info {
-                        ui.add_space(8.0);
-                        ui.label("Connection Info:");
-                        if let Some(val) = conn_info.max_outbound {
-                            ui.label(&format!("  • Max Outbound: {}", val));
-                        }
-                        if let Some(val) = conn_info.max_inbound {
-                            ui.label(&format!("  • Max Inbound: {}", val));
-                        }
-                        if let Some(val) = conn_info.max_concurrent_outbound_dials {
-                            ui.label(&format!("  • Max Concurrent Outbound Dials: {}", val));
-                        }
-                    }
-                    
-                    // Reputation Weights
-                    if let Some(rep_weights) = &self.reth_config.peers.reputation_weights {
-                        ui.add_space(8.0);
-                        ui.label("Reputation Weights:");
-                        if let Some(val) = rep_weights.bad_message {
-                            ui.label(&format!("  • Bad Message: {}", val));
-                        }
-                        if let Some(val) = rep_weights.bad_block {
-                            ui.label(&format!("  • Bad Block: {}", val));
-                        }
-                        if let Some(val) = rep_weights.bad_transactions {
-                            ui.label(&format!("  • Bad Transactions: {}", val));
-                        }
-                        if let Some(val) = rep_weights.already_seen_transactions {
-                            ui.label(&format!("  • Already Seen Transactions: {}", val));
-                        }
-                        if let Some(val) = rep_weights.timeout {
-                            ui.label(&format!("  • Timeout: {}", val));
-                        }
-                        if let Some(val) = rep_weights.bad_protocol {
-                            ui.label(&format!("  • Bad Protocol: {}", val));
-                        }
-                        if let Some(val) = rep_weights.failed_to_connect {
-                            ui.label(&format!("  • Failed to Connect: {}", val));
-                        }
-                        if let Some(val) = rep_weights.dropped {
-                            ui.label(&format!("  • Dropped: {}", val));
-                        }
-                        if let Some(val) = rep_weights.bad_announcement {
-                            ui.label(&format!("  • Bad Announcement: {}", val));
-                        }
-                    }
-                    
-                    // Backoff Durations
-                    if let Some(backoff) = &self.reth_config.peers.backoff_durations {
-                        ui.add_space(8.0);
-                        ui.label("Backoff Durations:");
-                        if let Some(val) = &backoff.low {
-                            ui.label(&format!("  • Low: {}", val));
-                        }
-                        if let Some(val) = &backoff.medium {
-                            ui.label(&format!("  • Medium: {}", val));
-                        }
-                        if let Some(val) = &backoff.high {
-                            ui.label(&format!("  • High: {}", val));
-                        }
-                        if let Some(val) = &backoff.max {
-                            ui.label(&format!("  • Max: {}", val));
-                        }
-                    }
-                }
-            });
-            
-            ui.add_space(12.0);
-            
-            // Sessions Configuration
-            ui.collapsing("Sessions Configuration", |ui| {
-                if self.settings_edit_mode {
-                    // Basic session settings
-                    if Self::editable_u32_field(ui, "Session Command Buffer", &mut self.editable_config.sessions.session_command_buffer) {
-                        self.config_modified = true;
-                    }
-                    
-                    if Self::editable_u32_field(ui, "Session Event Buffer", &mut self.editable_config.sessions.session_event_buffer) {
-                        self.config_modified = true;
-                    }
-                    
-                    ui.add_space(8.0);
-                    
-                    // Session Limits (empty struct, just show configured status)
-                    if self.editable_config.sessions.limits.is_some() {
-                        ui.label("Limits: Configured");
-                        if ui.button("Remove Limits").clicked() {
-                            self.editable_config.sessions.limits = None;
-                            self.config_modified = true;
-                        }
-                    } else {
-                        if ui.button("+ Add Limits").clicked() {
-                            self.editable_config.sessions.limits = Some(SessionLimitsConfig::default());
-                            self.config_modified = true;
-                        }
-                    }
-                    
-                    ui.add_space(8.0);
-                    
-                    // Initial Internal Request Timeout
-                    ui.label("Initial Internal Request Timeout:");
-                    if let Some(timeout) = &mut self.editable_config.sessions.initial_internal_request_timeout {
-                        ui.indent("initial_timeout", |ui| {
-                            if Self::editable_u64_field(ui, "Seconds", &mut timeout.secs) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_u32_field(ui, "Nanoseconds", &mut timeout.nanos) {
-                                self.config_modified = true;
-                            }
-                        });
-                    } else {
-                        if ui.button("+ Add Initial Internal Request Timeout").clicked() {
-                            self.editable_config.sessions.initial_internal_request_timeout = Some(TimeoutConfig::default());
-                            self.config_modified = true;
-                        }
-                    }
-                    
-                    ui.add_space(8.0);
-                    
-                    // Protocol Breach Request Timeout
-                    ui.label("Protocol Breach Request Timeout:");
-                    if let Some(timeout) = &mut self.editable_config.sessions.protocol_breach_request_timeout {
-                        ui.indent("protocol_breach_timeout", |ui| {
-                            if Self::editable_u64_field(ui, "Seconds", &mut timeout.secs) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_u32_field(ui, "Nanoseconds", &mut timeout.nanos) {
-                                self.config_modified = true;
-                            }
-                        });
-                    } else {
-                        if ui.button("+ Add Protocol Breach Request Timeout").clicked() {
-                            self.editable_config.sessions.protocol_breach_request_timeout = Some(TimeoutConfig::default());
-                            self.config_modified = true;
-                        }
-                    }
-                    
-                    ui.add_space(8.0);
-                    
-                    // Pending Session Timeout
-                    ui.label("Pending Session Timeout:");
-                    if let Some(timeout) = &mut self.editable_config.sessions.pending_session_timeout {
-                        ui.indent("pending_session_timeout", |ui| {
-                            if Self::editable_u64_field(ui, "Seconds", &mut timeout.secs) {
-                                self.config_modified = true;
-                            }
-                            if Self::editable_u32_field(ui, "Nanoseconds", &mut timeout.nanos) {
-                                self.config_modified = true;
-                            }
-                        });
-                    } else {
-                        if ui.button("+ Add Pending Session Timeout").clicked() {
-                            self.editable_config.sessions.pending_session_timeout = Some(TimeoutConfig::default());
-                            self.config_modified = true;
-                        }
-                    }
-                } else {
-                    // Read-only view
-                    if let Some(val) = self.reth_config.sessions.session_command_buffer {
-                        ui.label(&format!("Session Command Buffer: {}", val));
-                    }
-                    if let Some(val) = self.reth_config.sessions.session_event_buffer {
-                        ui.label(&format!("Session Event Buffer: {}", val));
-                    }
-                    
-                    if self.reth_config.sessions.limits.is_some() {
-                        ui.label("Limits: Configured");
-                    }
-                    
-                    if let Some(timeout) = &self.reth_config.sessions.initial_internal_request_timeout {
-                        ui.label("Initial Internal Request Timeout:");
-                        if let Some(secs) = timeout.secs {
-                            ui.label(&format!("  • Seconds: {}", secs));
-                        }
-                        if let Some(nanos) = timeout.nanos {
-                            ui.label(&format!("  • Nanoseconds: {}", nanos));
-                        }
-                    }
-                    
-                    if let Some(timeout) = &self.reth_config.sessions.protocol_breach_request_timeout {
-                        ui.label("Protocol Breach Request Timeout:");
-                        if let Some(secs) = timeout.secs {
-                            ui.label(&format!("  • Seconds: {}", secs));
-                        }
-                        if let Some(nanos) = timeout.nanos {
-                            ui.label(&format!("  • Nanoseconds: {}", nanos));
-                        }
-                    }
-                    
-                    if let Some(timeout) = &self.reth_config.sessions.pending_session_timeout {
-                        ui.label("Pending Session Timeout:");
-                        if let Some(secs) = timeout.secs {
-                            ui.label(&format!("  • Seconds: {}", secs));
-                        }
-                        if let Some(nanos) = timeout.nanos {
-                            ui.label(&format!("  • Nanoseconds: {}", nanos));
-                        }
-                    }
-                }
-            });
-            
-            ui.add_space(12.0);
-            
-            // Pruning Configuration
-            ui.collapsing("Pruning Configuration", |ui| {
-                if self.settings_edit_mode {
-                    // Basic prune settings
-                    if Self::editable_u64_field(ui, "Block Interval", &mut self.editable_config.prune.block_interval) {
-                        self.config_modified = true;
-                    }
-                    
-                    ui.add_space(8.0);
-                    
-                    // Pruning Segments
-                    ui.label("Pruning Segments:");
-                    if let Some(segments) = &mut self.editable_config.prune.segments {
-                        ui.indent("prune_segments", |ui| {
-                            // Sender Recovery
-                            if Self::editable_string_field(ui, "Sender Recovery", &mut segments.sender_recovery) {
-                                self.config_modified = true;
-                            }
-                            
-                            ui.add_space(4.0);
-                            
-                            // Receipts
-                            ui.label("Receipts:");
-                            if let Some(receipts) = &mut segments.receipts {
-                                ui.indent("receipts", |ui| {
-                                    if Self::editable_u64_field(ui, "Distance", &mut receipts.distance) {
-                                        self.config_modified = true;
-                                    }
-                                });
-                            } else {
-                                if ui.button("+ Add Receipts").clicked() {
-                                    segments.receipts = Some(PruneReceiptsConfig::default());
-                                    self.config_modified = true;
-                                }
-                            }
-                            
-                            ui.add_space(4.0);
-                            
-                            // Account History
-                            ui.label("Account History:");
-                            if let Some(account_history) = &mut segments.account_history {
-                                ui.indent("account_history", |ui| {
-                                    if Self::editable_u64_field(ui, "Distance", &mut account_history.distance) {
-                                        self.config_modified = true;
-                                    }
-                                });
-                            } else {
-                                if ui.button("+ Add Account History").clicked() {
-                                    segments.account_history = Some(PruneHistoryConfig::default());
-                                    self.config_modified = true;
-                                }
-                            }
-                            
-                            ui.add_space(4.0);
-                            
-                            // Storage History
-                            ui.label("Storage History:");
-                            if let Some(storage_history) = &mut segments.storage_history {
-                                ui.indent("storage_history", |ui| {
-                                    if Self::editable_u64_field(ui, "Distance", &mut storage_history.distance) {
-                                        self.config_modified = true;
-                                    }
-                                });
-                            } else {
-                                if ui.button("+ Add Storage History").clicked() {
-                                    segments.storage_history = Some(PruneHistoryConfig::default());
-                                    self.config_modified = true;
-                                }
-                            }
-                            
-                            ui.add_space(4.0);
-                            
-                            // Receipts Log Filter (empty struct)
-                            if segments.receipts_log_filter.is_some() {
-                                ui.label("Receipts Log Filter: Configured");
-                                if ui.button("Remove Receipts Log Filter").clicked() {
-                                    segments.receipts_log_filter = None;
-                                    self.config_modified = true;
-                                }
-                            } else {
-                                if ui.button("+ Add Receipts Log Filter").clicked() {
-                                    segments.receipts_log_filter = Some(PruneReceiptsLogFilterConfig::default());
-                                    self.config_modified = true;
-                                }
-                            }
-                        });
-                    } else {
-                        if ui.button("+ Add Pruning Segments").clicked() {
-                            self.editable_config.prune.segments = Some(PruneSegments::default());
-                            self.config_modified = true;
-                        }
-                    }
-                } else {
-                    // Read-only view
-                    if let Some(val) = self.reth_config.prune.block_interval {
-                        ui.label(&format!("Block Interval: {}", val));
-                    }
-                    
-                    if let Some(segments) = &self.reth_config.prune.segments {
-                        ui.label("Pruning Segments:");
-                        ui.add_space(4.0);
-                        
-                        if let Some(val) = &segments.sender_recovery {
-                            ui.label(&format!("  • Sender Recovery: {}", val));
-                        }
-                        if let Some(receipts) = &segments.receipts {
-                            ui.label("  • Receipts:");
-                            if let Some(distance) = receipts.distance {
-                                ui.label(&format!("    - Distance: {}", distance));
-                            }
-                        }
-                        if let Some(account_history) = &segments.account_history {
-                            ui.label("  • Account History:");
-                            if let Some(distance) = account_history.distance {
-                                ui.label(&format!("    - Distance: {}", distance));
-                            }
-                        }
-                        if let Some(storage_history) = &segments.storage_history {
-                            ui.label("  • Storage History:");
-                            if let Some(distance) = storage_history.distance {
-                                ui.label(&format!("    - Distance: {}", distance));
-                            }
-                        }
-                        if segments.receipts_log_filter.is_some() {
-                            ui.label("  • Receipts Log Filter: Configured");
-                        }
-                    }
-                }
-            });
-            
-            ui.add_space(24.0);
-            
-            ui.horizontal(|ui| {
-                if self.settings_edit_mode {
-                    // Save button (only enabled if there are changes)
-                    let save_button = egui::Button::new("💾 Save Changes")
-                        .fill(if self.config_modified { RethTheme::SUCCESS } else { RethTheme::SURFACE });
-                    
-                    if ui.add_enabled(self.config_modified, save_button).clicked() {
-                        match self.save_reth_config() {
-                            Ok(()) => {
-                                self.settings_edit_mode = false; // Exit edit mode after saving
-                            }
-                            Err(e) => {
-                                eprintln!("Failed to save configuration: {}", e);
-                            }
-                        }
-                    }
-                    
-                    ui.add_space(8.0);
-                    
-                    // Cancel/Reset button (only enabled if there are changes)
-                    if ui.add_enabled(self.config_modified, egui::Button::new("↶ Reset Changes")).clicked() {
-                        self.reset_editable_config();
-                    }
-                    
-                    ui.add_space(8.0);
-                    
-                    if self.config_modified {
-                        ui.label(RethTheme::warning_text("⚠ Unsaved changes"));
-                    }
-                } else {
-                    if ui.button("🔄 Reload Config").clicked() {
-                        let (config, path) = Self::load_reth_config();
-                        self.reth_config = config.clone();
-                        self.reth_config_path = path;
-                        self.editable_config = config;
-                        self.config_modified = false;
-                    }
-                }
-            });
-        });
-    }
+    // Removed show_settings_content function - functionality moved to NodeSettingsWindow
 }
 
 impl eframe::App for MyApp {
@@ -2047,10 +548,19 @@ impl eframe::App for MyApp {
             }
         }
         
+        // Auto-start terminal if we detected an existing Reth process
+        if self.detected_existing_process && !matches!(self.install_status, InstallStatus::Running) {
+            self.install_status = InstallStatus::Running;
+            self.detected_existing_process = false; // Only do this once
+        }
+        
         // Update Reth node status and collect logs
         if matches!(self.install_status, InstallStatus::Running) {
             self.reth_node.check_process_status();
             let new_logs = self.reth_node.get_logs();
+            if !new_logs.is_empty() {
+                println!("Got {} new log lines", new_logs.len());
+            }
             self.node_logs.extend(new_logs);
             
             // Keep only last 1000 logs for performance
@@ -2058,8 +568,27 @@ impl eframe::App for MyApp {
                 self.node_logs.drain(0..self.node_logs.len() - 1000);
             }
             
+            // Periodically log the current state for debugging
+            let now = std::time::Instant::now();
+            if now.duration_since(self.last_debug_log).as_secs() >= 5 {
+                self.last_debug_log = now;
+                println!("Current state - Total logs: {}, Is external: {}, Log path: {:?}", 
+                    self.node_logs.len(), 
+                    self.reth_node.is_monitoring_external(),
+                    self.reth_node.get_external_log_path()
+                );
+            }
+            
             if !self.reth_node.is_running() {
-                self.install_status = InstallStatus::Stopped;
+                // If we were monitoring an external process, go back to Completed
+                // If we were running our own process, mark as Stopped
+                if self.reth_node.get_external_log_path().is_some() {
+                    println!("External Reth process stopped, returning to main interface");
+                    self.install_status = InstallStatus::Completed;
+                } else {
+                    println!("Managed Reth process stopped");
+                    self.install_status = InstallStatus::Stopped;
+                }
             }
         }
 
@@ -2124,7 +653,7 @@ impl eframe::App for MyApp {
                 .default_height(200.0)
                 .open(&mut open)
                 .show(ctx, |ui| {
-                    self.show_desktop_settings_content(ui);
+                    DesktopSettingsWindow::show_content(ui, &mut self.desktop_settings);
                 });
             if !open {
                 self.show_desktop_settings = false;
@@ -2140,7 +669,14 @@ impl eframe::App for MyApp {
                 .default_height(500.0)
                 .open(&mut open)
                 .show(ctx, |ui| {
-                    self.show_settings_content(ui);
+                    NodeSettingsWindow::show_content(
+                        ui,
+                        &self.reth_config,
+                        &self.reth_config_path,
+                        &mut self.editable_config,
+                        &mut self.config_modified,
+                        &mut self.settings_edit_mode,
+                    );
                 });
             if !open {
                 self.show_settings = false;
@@ -2427,16 +963,41 @@ impl eframe::App for MyApp {
                                 ui.set_max_width(max_width);
                                 
                                 ui.horizontal(|ui| {
-                                    ui.label(RethTheme::success_text("🟢 Reth Node Running"));
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        let stop_button = egui::Button::new(RethTheme::error_text("Stop"))
-                                            .min_size(egui::vec2(60.0, 24.0));
-                                        
-                                        if ui.add(stop_button).clicked() {
-                                            self.stop_reth();
-                                        }
-                                    });
+                                    // Show different status based on whether we own the process
+                                    if self.reth_node.is_monitoring_external() {
+                                        ui.label(RethTheme::success_text("🟢 Monitoring External Reth Process"));
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            let disconnect_button = egui::Button::new(RethTheme::warning_text("Disconnect"))
+                                                .min_size(egui::vec2(80.0, 24.0));
+                                            
+                                            if ui.add(disconnect_button).clicked() {
+                                                self.install_status = InstallStatus::Completed;
+                                                // We need a method to disconnect from external process
+                                                self.disconnect_from_external_reth();
+                                            }
+                                        });
+                                    } else {
+                                        ui.label(RethTheme::success_text("🟢 Reth Node Running"));
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            let stop_button = egui::Button::new(RethTheme::error_text("Stop"))
+                                                .min_size(egui::vec2(60.0, 24.0));
+                                            
+                                            if ui.add(stop_button).clicked() {
+                                                self.stop_reth();
+                                            }
+                                        });
+                                    }
                                 });
+                                
+                                // Show log file path if we have one (for both external and managed processes)
+                                if let Some(log_path) = self.reth_node.get_external_log_path() {
+                                    ui.add_space(4.0);
+                                    if self.reth_node.is_monitoring_external() {
+                                        ui.label(RethTheme::muted_text(&format!("📄 Tailing log file: {}", log_path.display())));
+                                    } else {
+                                        ui.label(RethTheme::muted_text(&format!("📄 Logging to: {}", log_path.display())));
+                                    }
+                                }
                                 
                                 ui.add_space(12.0);
                                 
@@ -2486,10 +1047,49 @@ impl eframe::App for MyApp {
                                                 }
                                                 
                                                 if self.node_logs.is_empty() {
-                                                    ui.label(egui::RichText::new("Starting Reth node...")
-                                                        .size(12.0)
-                                                        .color(egui::Color32::GRAY)
-                                                        .monospace());
+                                                    if self.reth_node.is_monitoring_external() {
+                                                        if self.reth_node.get_external_log_path().is_some() {
+                                                            ui.label(egui::RichText::new("Monitoring external Reth process...")
+                                                                .size(12.0)
+                                                                .color(egui::Color32::LIGHT_BLUE)
+                                                                .monospace());
+                                                            ui.label(egui::RichText::new("Tailing log file for real-time output...")
+                                                                .size(11.0)
+                                                                .color(egui::Color32::LIGHT_GREEN)
+                                                                .monospace());
+                                                            ui.label(egui::RichText::new("Logs will appear here as they are generated.")
+                                                                .size(11.0)
+                                                                .color(egui::Color32::GRAY)
+                                                                .monospace());
+                                                        } else {
+                                                            ui.label(egui::RichText::new("Monitoring external Reth process...")
+                                                                .size(12.0)
+                                                                .color(egui::Color32::LIGHT_BLUE)
+                                                                .monospace());
+                                                            ui.label(egui::RichText::new("⚠ No log files found")
+                                                                .size(11.0)
+                                                                .color(egui::Color32::YELLOW)
+                                                                .monospace());
+                                                            ui.label(egui::RichText::new("Reth may not be configured for file logging.")
+                                                                .size(10.0)
+                                                                .color(egui::Color32::GRAY)
+                                                                .monospace());
+                                                            ui.label(egui::RichText::new("To enable: restart Reth with --log.file.directory <path>")
+                                                                .size(10.0)
+                                                                .color(egui::Color32::GRAY)
+                                                                .monospace());
+                                                            ui.add_space(8.0);
+                                                            if ui.button("Disconnect and Start Managed Reth").clicked() {
+                                                                self.disconnect_from_external_reth();
+                                                                self.install_status = InstallStatus::Completed;
+                                                            }
+                                                        }
+                                                    } else {
+                                                        ui.label(egui::RichText::new("Starting Reth node...")
+                                                            .size(12.0)
+                                                            .color(egui::Color32::GRAY)
+                                                            .monospace());
+                                                    }
                                                 }
                                             });
                                     });
