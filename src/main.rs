@@ -26,6 +26,20 @@ struct RethConfig {
     prune: PruneConfig,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct DesktopSettings {
+    #[serde(default)]
+    keep_reth_running_in_background: bool,
+}
+
+impl Default for DesktopSettings {
+    fn default() -> Self {
+        Self {
+            keep_reth_running_in_background: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 struct StagesConfig {
     #[serde(default)]
@@ -333,6 +347,8 @@ struct MyApp {
     latest_version: Option<String>,
     update_available: bool,
     show_settings: bool,
+    show_desktop_settings: bool,
+    desktop_settings: DesktopSettings,
     reth_config: RethConfig,
     reth_config_path: Option<std::path::PathBuf>,
     editable_config: RethConfig,
@@ -360,6 +376,9 @@ impl MyApp {
         
         // Load Reth configuration
         let (reth_config, reth_config_path) = Self::load_reth_config();
+        
+        // Load desktop settings
+        let desktop_settings = Self::load_desktop_settings();
         
         // Spawn a task to handle installation commands
         runtime.spawn(async move {
@@ -420,6 +439,8 @@ impl MyApp {
             latest_version: None,
             update_available: false,
             show_settings: false,
+            show_desktop_settings: false,
+            desktop_settings,
             reth_config: reth_config.clone(),
             reth_config_path,
             editable_config: reth_config,
@@ -593,6 +614,60 @@ impl MyApp {
             println!("  - {}", path.display());
         }
         (RethConfig::default(), None)
+    }
+    
+    fn get_settings_file_path() -> std::path::PathBuf {
+        // Place settings.toml in the same directory as the reth binary
+        dirs::home_dir()
+            .unwrap_or_default()
+            .join(".reth-desktop")
+            .join("settings.toml")
+    }
+    
+    fn load_desktop_settings() -> DesktopSettings {
+        let settings_path = Self::get_settings_file_path();
+        
+        match std::fs::read_to_string(&settings_path) {
+            Ok(content) => {
+                match toml::from_str::<DesktopSettings>(&content) {
+                    Ok(settings) => {
+                        println!("Loaded desktop settings from: {}", settings_path.display());
+                        settings
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to parse settings.toml: {}, using defaults", e);
+                        DesktopSettings::default()
+                    }
+                }
+            }
+            Err(_) => {
+                println!("No settings.toml found, creating with defaults at: {}", settings_path.display());
+                let default_settings = DesktopSettings::default();
+                // Try to create the settings file with defaults
+                if let Err(e) = Self::save_desktop_settings_static(&default_settings) {
+                    eprintln!("Failed to create default settings.toml: {}", e);
+                }
+                default_settings
+            }
+        }
+    }
+    
+    fn save_desktop_settings(&self) -> Result<(), Box<dyn std::error::Error>> {
+        Self::save_desktop_settings_static(&self.desktop_settings)
+    }
+    
+    fn save_desktop_settings_static(settings: &DesktopSettings) -> Result<(), Box<dyn std::error::Error>> {
+        let settings_path = Self::get_settings_file_path();
+        
+        // Create the directory if it doesn't exist
+        if let Some(parent) = settings_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        
+        let toml_string = toml::to_string_pretty(settings)?;
+        std::fs::write(&settings_path, toml_string)?;
+        println!("Saved desktop settings to: {}", settings_path.display());
+        Ok(())
     }
     
     async fn check_for_updates(&mut self) {
@@ -915,17 +990,28 @@ impl MyApp {
         changed
     }
     
+    fn show_desktop_settings_content(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.add_space(8.0);
+            
+            // Background running setting
+            ui.horizontal(|ui| {
+                ui.label("Keep Reth running in the background:");
+                if ui.checkbox(&mut self.desktop_settings.keep_reth_running_in_background, "").changed() {
+                    // Save settings when changed
+                    if let Err(e) = self.save_desktop_settings() {
+                        eprintln!("Failed to save desktop settings: {}", e);
+                    }
+                }
+            });
+            
+            ui.add_space(8.0);
+            ui.label(RethTheme::muted_text("When enabled, Reth will continue running even when the application window is closed."));
+        });
+    }
+    
     fn show_settings_content(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
-            // Header with title and close button
-            ui.horizontal(|ui| {
-                ui.heading("Reth Node Configuration");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("✖ Close").clicked() {
-                        self.show_settings = false;
-                    }
-                });
-            });
             ui.add_space(8.0);
             
             // Config file path
@@ -1981,6 +2067,10 @@ impl eframe::App for MyApp {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("Settings", |ui| {
+                    if ui.button("Reth Desktop Config").clicked() {
+                        self.show_desktop_settings = true;
+                        ui.close_menu();
+                    }
                     if ui.button("Node Configuration").clicked() {
                         self.show_settings = true;
                         self.reset_editable_config(); // Reset to current saved state when opening
@@ -2025,15 +2115,36 @@ impl eframe::App for MyApp {
             ui.add_space(8.0);
         });
         
-        // Settings window
+        // Desktop Settings window
+        if self.show_desktop_settings {
+            let mut open = true;
+            egui::Window::new("Reth Desktop Configuration")
+                .resizable(true)
+                .default_width(400.0)
+                .default_height(200.0)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    self.show_desktop_settings_content(ui);
+                });
+            if !open {
+                self.show_desktop_settings = false;
+            }
+        }
+        
+        // Node Settings window
         if self.show_settings {
+            let mut open = true;
             egui::Window::new("Reth Node Configuration")
                 .resizable(true)
                 .default_width(600.0)
                 .default_height(500.0)
+                .open(&mut open)
                 .show(ctx, |ui| {
                     self.show_settings_content(ui);
                 });
+            if !open {
+                self.show_settings = false;
+            }
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
