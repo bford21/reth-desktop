@@ -289,19 +289,18 @@ impl RethNode {
     fn get_reth_log_path() -> Option<PathBuf> {
         // First check cache directory (where Reth actually puts logs by default)
         if let Some(cache_dir) = dirs::cache_dir() {
-            // Try network-specific log directory first (mainnet is most common)
-            let cache_logs_mainnet_path = cache_dir.join("reth").join("logs").join("mainnet");
-            println!("Checking Reth cache logs mainnet directory: {}", cache_logs_mainnet_path.display());
+            let cache_logs_base = cache_dir.join("reth").join("logs");
             
+            // Try mainnet directory first (most common)
+            let cache_logs_mainnet_path = cache_logs_base.join("mainnet");
+            println!("Checking Reth cache logs mainnet directory: {}", cache_logs_mainnet_path.display());
             if let Some(log_file) = Self::find_log_files_in_directory(&cache_logs_mainnet_path) {
                 return Some(log_file);
             }
             
             // Then try the general logs directory
-            let cache_logs_path = cache_dir.join("reth").join("logs");
-            println!("Checking Reth cache logs directory: {}", cache_logs_path.display());
-            
-            if let Some(log_file) = Self::find_log_files_in_directory(&cache_logs_path) {
+            println!("Checking Reth cache logs directory: {}", cache_logs_base.display());
+            if let Some(log_file) = Self::find_log_files_in_directory(&cache_logs_base) {
                 return Some(log_file);
             }
         }
@@ -408,9 +407,9 @@ impl RethNode {
     /// Get the default log directory where we'll tell Reth to write logs
     fn get_default_log_directory() -> Option<PathBuf> {
         // Use cache directory as per Reth's default behavior
+        // Don't include mainnet here - let Reth create its own network subdirectory
         if let Some(cache_dir) = dirs::cache_dir() {
-            // Use the mainnet subdirectory to match Reth's actual behavior
-            let log_dir = cache_dir.join("reth").join("logs").join("mainnet");
+            let log_dir = cache_dir.join("reth").join("logs");
             return Some(log_dir);
         }
         
@@ -418,21 +417,21 @@ impl RethNode {
         #[cfg(target_os = "macos")]
         {
             if let Some(home) = dirs::home_dir() {
-                return Some(home.join("Library").join("Caches").join("reth").join("logs").join("mainnet"));
+                return Some(home.join("Library").join("Caches").join("reth").join("logs"));
             }
         }
         
         #[cfg(target_os = "linux")]
         {
             if let Some(home) = dirs::home_dir() {
-                return Some(home.join(".cache").join("reth").join("logs").join("mainnet"));
+                return Some(home.join(".cache").join("reth").join("logs"));
             }
         }
         
         #[cfg(target_os = "windows")]
         {
             if let Some(local_data) = dirs::data_local_dir() {
-                return Some(local_data.join("reth").join("logs").join("mainnet"));
+                return Some(local_data.join("reth").join("logs"));
             }
         }
         
@@ -468,7 +467,7 @@ impl RethNode {
             }
         }
         
-        // If no exact matches, look for any .log files, prioritizing reth-* pattern files
+        // If no exact matches, look for any .log files, prioritizing by modification time
         if let Ok(entries) = std::fs::read_dir(dir_path) {
             println!("Directory contents:");
             let mut log_files = Vec::new();
@@ -479,29 +478,47 @@ impl RethNode {
                     let file_name_str = file_name.to_string_lossy();
                     println!("  - {}", file_name_str);
                     
-                    // Collect all .log files
+                    // Collect all .log files with their metadata
                     if file_name_str.ends_with(".log") {
-                        log_files.push((entry.path(), file_name_str.to_string()));
+                        if let Ok(metadata) = entry.metadata() {
+                            if let Ok(modified) = metadata.modified() {
+                                log_files.push((entry.path(), file_name_str.to_string(), modified));
+                            }
+                        }
                     }
                 }
             }
             
-            // Sort to prioritize reth-* pattern files (they'll be the most recent)
+            // Sort by priority: 1) reth.log first, 2) reth-* pattern files, 3) most recent by modification time
             log_files.sort_by(|a, b| {
-                // Prioritize files that start with "reth-"
+                // Prioritize exact "reth.log" first
+                let a_exact = a.1 == "reth.log";
+                let b_exact = b.1 == "reth.log";
+                
+                if a_exact && !b_exact {
+                    return std::cmp::Ordering::Less;
+                }
+                if !a_exact && b_exact {
+                    return std::cmp::Ordering::Greater;
+                }
+                
+                // Then prioritize files that start with "reth-"
                 let a_is_reth = a.1.starts_with("reth-");
                 let b_is_reth = b.1.starts_with("reth-");
                 
                 match (a_is_reth, b_is_reth) {
                     (true, false) => std::cmp::Ordering::Less,
                     (false, true) => std::cmp::Ordering::Greater,
-                    _ => b.1.cmp(&a.1), // Reverse sort to get most recent first
+                    _ => {
+                        // Same priority level - sort by modification time (most recent first)
+                        b.2.cmp(&a.2)
+                    }
                 }
             });
             
             // Return the first (highest priority) log file
-            if let Some((log_path, file_name)) = log_files.first() {
-                println!("Found log file: {} (selected from {} total log files)", file_name, log_files.len());
+            if let Some((log_path, file_name, modified)) = log_files.first() {
+                println!("Found log file: {} (modified: {:?}, selected from {} total log files)", file_name, modified, log_files.len());
                 return Some(log_path.clone());
             }
         }

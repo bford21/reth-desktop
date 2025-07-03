@@ -145,7 +145,7 @@ impl MyApp {
             }
         }
         
-        Self {
+        let mut app = Self {
             installer: Arc::new(Mutex::new(RethInstaller::new())),
             install_status: initial_status,
             installing: false,
@@ -159,7 +159,7 @@ impl MyApp {
             is_reth_installed,
             was_detected_on_startup: is_reth_installed,
             detected_existing_process: detect_existing,
-            installed_version,
+            installed_version: installed_version.clone(),
             latest_version: None,
             update_available: false,
             show_settings: false,
@@ -170,8 +170,10 @@ impl MyApp {
             editable_config: reth_config,
             config_modified: false,
             settings_edit_mode: false,
-            last_debug_log: std::time::Instant::now(),
-        }
+            last_debug_log: std::time::Instant::now()
+        };
+        
+        app
     }
     
     fn load_logo(ctx: &egui::Context) -> Option<egui::TextureHandle> {
@@ -483,18 +485,6 @@ impl MyApp {
         self.install_status = InstallStatus::Stopped;
     }
     
-    fn save_reth_config(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(config_path) = &self.reth_config_path {
-            let toml_string = toml::to_string_pretty(&self.editable_config)?;
-            std::fs::write(config_path, toml_string)?;
-            self.reth_config = self.editable_config.clone();
-            self.config_modified = false;
-            println!("Saved configuration to: {}", config_path.display());
-            Ok(())
-        } else {
-            Err("No configuration file path available".into())
-        }
-    }
     
     fn reset_editable_config(&mut self) {
         self.editable_config = self.reth_config.clone();
@@ -1154,5 +1144,25 @@ impl eframe::App for MyApp {
                 ui.add_space(40.0);
             });
         });
+    }
+    
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Handle application shutdown based on settings
+        if self.reth_node.is_running() {
+            if self.desktop_settings.keep_reth_running_in_background {
+                println!("Keeping Reth running in background (setting enabled)");
+                // Don't stop the process - let it continue running
+            } else {
+                println!("Stopping Reth on application exit (setting disabled)");
+                if let Err(e) = self.reth_node.stop() {
+                    eprintln!("Error stopping Reth on exit: {}", e);
+                }
+            }
+        }
+        
+        // Save desktop settings before closing
+        if let Err(e) = DesktopSettingsManager::save_desktop_settings(&self.desktop_settings) {
+            eprintln!("Failed to save desktop settings on exit: {}", e);
+        }
     }
 }

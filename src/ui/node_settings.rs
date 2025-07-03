@@ -1174,7 +1174,7 @@ impl NodeSettingsWindow {
                 }
             } else {
                 if ui.button("🔄 Reload Config").clicked() {
-                    let (config, path) = RethConfigManager::load_reth_config();
+                    let (_config, _path) = RethConfigManager::load_reth_config();
                     // TODO: Update the main app state with reloaded config
                     // This would need to be handled at the app level
                 }
