@@ -6,6 +6,17 @@ use std::thread;
 use std::path::PathBuf;
 use std::fs::File;
 use tokio::sync::mpsc;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CliOption {
+    pub name: String,
+    pub description: String,
+    pub takes_value: bool,
+    pub value_name: Option<String>,
+    pub possible_values: Option<Vec<String>>,
+    pub accepts_multiple: bool,
+}
 
 #[derive(Debug, Clone)]
 pub struct LogLine {
@@ -47,6 +58,7 @@ pub struct RethNode {
     is_running: bool,
     external_log_path: Option<PathBuf>,
     last_external_check: std::time::Instant,
+    launch_command: Option<Vec<String>>,
 }
 
 impl RethNode {
@@ -58,10 +70,11 @@ impl RethNode {
             is_running: false,
             external_log_path: None,
             last_external_check: std::time::Instant::now(),
+            launch_command: None,
         }
     }
 
-    pub fn start(&mut self, reth_path: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub fn start(&mut self, reth_path: &str, custom_args: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if self.is_running {
             return Err("Reth node is already running".into());
         }
@@ -80,8 +93,16 @@ impl RethNode {
             }
         }
         
-        // Spawn the reth process with file logging enabled
+        // Build the command and track it for display
         let mut command = Command::new(reth_path);
+        let mut command_parts = vec![
+            reth_path.to_string(), 
+            "node".to_string(), 
+            "--full".to_string(), 
+            "--log.stdout.format".to_string(), 
+            "terminal".to_string()
+        ];
+        
         command
             .arg("node")
             .arg("--full")
@@ -102,16 +123,48 @@ impl RethNode {
                 .arg("50") // 50 MB max size per log file
                 .arg("--log.file.max-files")
                 .arg("3"); // Keep up to 3 log files
+            
+            // Add to command parts for display
+            command_parts.extend(vec![
+                "--log.file.directory".to_string(),
+                log_path.display().to_string(),
+                "--log.file.format".to_string(),
+                "terminal".to_string(),
+                "--log.file.filter".to_string(),
+                "info".to_string(),
+                "--log.file.max-size".to_string(),
+                "50".to_string(),
+                "--log.file.max-files".to_string(),
+                "3".to_string(),
+            ]);
                 
             // Store the log directory path - we'll find the actual log file later
             // Reth creates files with date patterns like reth-2024-01-15-20.log
             self.external_log_path = Some(log_path.clone());
         }
         
+        // Add custom arguments from settings
+        println!("Adding {} custom arguments:", custom_args.len());
+        for arg in custom_args {
+            println!("  Adding custom arg: {}", arg);
+            command.arg(arg);
+            command_parts.push(arg.clone());
+        }
+        
+        // Store the command parts for display
+        self.launch_command = Some(command_parts);
+        
+        // Print the full command for debugging
+        println!("Final command: {:?}", command);
+        
         let mut child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()?;
+            .spawn()
+            .map_err(|e| {
+                eprintln!("Failed to spawn Reth process: {}", e);
+                e
+            })?;
 
         // Capture stdout
         if let Some(stdout) = child.stdout.take() {
@@ -163,11 +216,14 @@ impl RethNode {
             process.kill()?;
             process.wait()?;
             self.is_running = false;
-            // Clear the log path for managed processes
+            // Clear the log path and command for managed processes
             self.external_log_path = None;
+            self.launch_command = None;
         } else {
             // For external processes, just reset the running state
             self.is_running = false;
+            // Clear the launch command when disconnecting
+            self.launch_command = None;
             // Keep the log path for external processes in case we reconnect
         }
         
@@ -186,6 +242,11 @@ impl RethNode {
     /// Get the path of the external log file being monitored
     pub fn get_external_log_path(&self) -> Option<&PathBuf> {
         self.external_log_path.as_ref()
+    }
+    
+    /// Get the command used to launch the Reth process
+    pub fn get_launch_command(&self) -> Option<&Vec<String>> {
+        self.launch_command.as_ref()
     }
 
     pub fn get_logs(&mut self) -> Vec<LogLine> {
@@ -221,6 +282,7 @@ impl RethNode {
                     self.is_running = false;
                     self.process = None;
                     self.external_log_path = None;
+                    self.launch_command = None;
                 }
                 Ok(None) => {
                     // Process is still running
@@ -229,6 +291,7 @@ impl RethNode {
                     self.is_running = false;
                     self.process = None;
                     self.external_log_path = None;
+                    self.launch_command = None;
                 }
             }
         } else if self.is_running {
@@ -240,6 +303,7 @@ impl RethNode {
                 if !Self::detect_existing_reth_process() {
                     self.is_running = false;
                     self.external_log_path = None;
+                    self.launch_command = None;
                     println!("External Reth process has stopped");
                 }
             }
@@ -262,6 +326,140 @@ impl RethNode {
         }
         
         is_running
+    }
+    
+    /// Detect the command line of external Reth processes
+    fn detect_external_reth_command() -> Option<String> {
+        #[cfg(target_os = "macos")]
+        {
+            // First try using lsof to find process using Reth ports
+            let ports = vec![8545, 8546, 8551];
+            for port in ports {
+                match std::process::Command::new("lsof")
+                    .arg("-ti")
+                    .arg(format!(":{}", port))
+                    .output()
+                {
+                    Ok(output) => {
+                        let pid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        if !pid_str.is_empty() {
+                            // Found a PID, now get its command line
+                            match std::process::Command::new("ps")
+                                .arg("-p")
+                                .arg(&pid_str)
+                                .arg("-o")
+                                .arg("command=")
+                                .output()
+                            {
+                                Ok(cmd_output) => {
+                                    let cmd = String::from_utf8_lossy(&cmd_output.stdout).trim().to_string();
+                                    if !cmd.is_empty() && cmd.to_lowercase().contains("reth") {
+                                        println!("Found Reth process via port {}: {}", port, cmd);
+                                        return Some(cmd);
+                                    }
+                                }
+                                Err(_) => {}
+                            }
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+            
+            // Fallback to ps search
+            match std::process::Command::new("ps")
+                .arg("-axo")
+                .arg("command")
+                .output()
+            {
+                Ok(output) => {
+                    let output_str = String::from_utf8_lossy(&output.stdout);
+                    println!("Searching for Reth process in ps output...");
+                    for line in output_str.lines() {
+                        // Look for lines containing reth executable
+                        // This could be /path/to/reth, ./reth, or just reth
+                        let line_lower = line.to_lowercase();
+                        if (line_lower.contains("/reth") || line_lower.starts_with("reth")) 
+                            && !line_lower.contains("reth-desktop") 
+                            && !line.contains("grep") {
+                            // Further check if it's actually a reth node command
+                            if line.contains("node") || line.contains("--") {
+                                let cleaned = line.trim().to_string();
+                                println!("Found external Reth command: {}", cleaned);
+                                return Some(cleaned);
+                            }
+                        }
+                    }
+                    println!("No external Reth process found in ps output");
+                }
+                Err(e) => {
+                    println!("Failed to run ps command: {}", e);
+                }
+            }
+        }
+        
+        #[cfg(target_os = "linux")]
+        {
+            // On Linux, use ps with different args
+            match std::process::Command::new("ps")
+                .arg("-eo")
+                .arg("command")
+                .arg("--no-headers")
+                .output()
+            {
+                Ok(output) => {
+                    let output_str = String::from_utf8_lossy(&output.stdout);
+                    println!("Searching for Reth process in ps output...");
+                    for line in output_str.lines() {
+                        let line_lower = line.to_lowercase();
+                        if (line_lower.contains("/reth") || line_lower.starts_with("reth")) 
+                            && !line_lower.contains("reth-desktop") 
+                            && !line.contains("grep") {
+                            if line.contains("node") || line.contains("--") {
+                                let cleaned = line.trim().to_string();
+                                println!("Found external Reth command: {}", cleaned);
+                                return Some(cleaned);
+                            }
+                        }
+                    }
+                    println!("No external Reth process found in ps output");
+                }
+                Err(e) => {
+                    println!("Failed to run ps command: {}", e);
+                }
+            }
+        }
+        
+        #[cfg(target_os = "windows")]
+        {
+            // On Windows, use wmic or tasklist
+            match std::process::Command::new("wmic")
+                .arg("process")
+                .arg("where")
+                .arg("name='reth.exe'")
+                .arg("get")
+                .arg("commandline")
+                .arg("/format:value")
+                .output()
+            {
+                Ok(output) => {
+                    let output_str = String::from_utf8_lossy(&output.stdout);
+                    for line in output_str.lines() {
+                        if line.starts_with("CommandLine=") && line.contains("node") {
+                            let command = line.strip_prefix("CommandLine=").unwrap_or(line);
+                            let cleaned = command.trim().to_string();
+                            println!("Found external Reth command: {}", cleaned);
+                            return Some(cleaned);
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("Failed to run wmic command: {}", e);
+                }
+            }
+        }
+        
+        None
     }
 
     /// Check if a specific port is listening (indicates Reth is running)
@@ -684,6 +882,18 @@ impl RethNode {
             self.is_running = true;
             self.process = None; // We don't own this process
             
+            // Try to detect the command used to launch the external process
+            if let Some(cmd_string) = Self::detect_external_reth_command() {
+                println!("Detected external Reth command: {}", cmd_string);
+                // Parse the command string into parts
+                let parts: Vec<String> = cmd_string.split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect();
+                self.launch_command = Some(parts);
+            } else {
+                println!("Connected to external Reth process (command detection failed)");
+            }
+            
             // Try to find and tail Reth's log file
             if let Some(log_path) = Self::get_reth_log_path() {
                 println!("Found Reth log file: {}", log_path.display());
@@ -703,5 +913,203 @@ impl RethNode {
         } else {
             Err("No existing Reth process found".into())
         }
+    }
+    
+    /// Parse available CLI options from reth node --help
+    pub fn get_available_cli_options(reth_path: &str) -> Vec<CliOption> {
+        let mut options = Vec::new();
+        
+        // Run reth node --help to get available options
+        match Command::new(reth_path)
+            .arg("node")
+            .arg("--help")
+            .output()
+        {
+            Ok(output) => {
+                let help_text = String::from_utf8_lossy(&output.stdout);
+                let lines: Vec<&str> = help_text.lines().collect();
+                
+                let mut i = 0;
+                while i < lines.len() {
+                    let line = lines[i].trim();
+                    
+                    // Look for lines starting with spaces followed by -- (long options)
+                    if line.trim_start().starts_with("--") && !line.trim_start().starts_with("---") {
+                        // Parse the option line
+                        // Format is: --option-name <VALUE>
+                        let trimmed = line.trim();
+                        
+                        // Split by first space to separate option from value placeholder
+                        let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
+                        if parts.len() >= 1 {
+                            let option_name = parts[0].to_string();
+                            let mut takes_value = false;
+                            let mut value_name = None;
+                            
+                            // Check if there's a value part
+                            if parts.len() > 1 {
+                                let rest = parts[1].trim();
+                                if rest.starts_with('<') && rest.contains('>') {
+                                    // Extract value name
+                                    if let Some(end) = rest.find('>') {
+                                        value_name = Some(rest[1..end].to_string());
+                                        takes_value = true;
+                                    }
+                                }
+                            }
+                            
+                            // Some known flags that don't take values
+                            let flag_patterns = vec![
+                                "--help", "--version", "--full", "--http", "--ws", 
+                                "--disable-", "--enable-", "--with-", "--without-"
+                            ];
+                            
+                            // If it's a known flag pattern and we didn't detect a value, mark as flag
+                            if !takes_value {
+                                for pattern in &flag_patterns {
+                                    if option_name.starts_with(pattern) || option_name == *pattern {
+                                        takes_value = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            // Get description from the next line and look for possible values
+                            let mut description = String::new();
+                            let mut possible_values = None;
+                            let mut accepts_multiple = false;
+                            
+                            // Check next few lines for description and possible values
+                            let mut j = i + 1;
+                            while j < lines.len() {
+                                let line = lines[j].trim();
+                                
+                                // Stop if we hit another option
+                                if line.starts_with("--") {
+                                    break;
+                                }
+                                
+                                // Skip empty lines
+                                if line.is_empty() {
+                                    j += 1;
+                                    continue;
+                                }
+                                
+                                // Check for possible values pattern: [possible values: ...]
+                                if line.contains("[possible values:") {
+                                    // Extract possible values
+                                    if let Some(start) = line.find("[possible values:") {
+                                        let values_part = &line[start + 17..]; // Skip "[possible values:"
+                                        if let Some(end) = values_part.find(']') {
+                                            let values_str = &values_part[..end];
+                                            let values: Vec<String> = values_str
+                                                .split(',')
+                                                .map(|s| s.trim().to_string())
+                                                .filter(|s| !s.is_empty())
+                                                .collect();
+                                            if !values.is_empty() {
+                                                possible_values = Some(values);
+                                            }
+                                        }
+                                    }
+                                } else if description.is_empty() {
+                                    // This is the description line
+                                    description = line.to_string();
+                                }
+                                
+                                j += 1;
+                                
+                                // Only look at a few lines to avoid going too far
+                                if j > i + 5 {
+                                    break;
+                                }
+                            }
+                            
+                            // Check if this parameter accepts multiple values
+                            // Look for indicators in the description or parameter name
+                            let desc_lower = description.to_lowercase();
+                            accepts_multiple = desc_lower.contains("comma-separated") || 
+                                             desc_lower.contains("comma separated") ||
+                                             desc_lower.contains("list of") ||
+                                             desc_lower.contains("multiple") ||
+                                             option_name.contains(".api") ||
+                                             option_name.contains(".namespaces");
+                            
+                            // Some options we want to skip or are already included
+                            let skip_options = vec![
+                                "--help", "--version", "--full", 
+                                "--log.stdout.format", "--log.file.directory",
+                                "--log.file.format", "--log.file.filter",
+                                "--log.file.max-size", "--log.file.max-files"
+                            ];
+                            
+                            if !skip_options.contains(&option_name.as_str()) && !description.is_empty() {
+                                options.push(CliOption {
+                                    name: option_name,
+                                    description,
+                                    takes_value,
+                                    value_name,
+                                    possible_values,
+                                    accepts_multiple,
+                                });
+                            }
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            Err(e) => {
+                println!("Failed to get CLI options: {}", e);
+            }
+        }
+        
+        // Add some common options that might be useful
+        if options.is_empty() {
+            // Fallback options if parsing fails
+            options.extend(vec![
+                CliOption {
+                    name: "--datadir".to_string(),
+                    description: "The path to the data directory".to_string(),
+                    takes_value: true,
+                    value_name: Some("PATH".to_string()),
+                    possible_values: None,
+                    accepts_multiple: false,
+                },
+                CliOption {
+                    name: "--port".to_string(),
+                    description: "The port to listen on".to_string(),
+                    takes_value: true,
+                    value_name: Some("PORT".to_string()),
+                    possible_values: None,
+                    accepts_multiple: false,
+                },
+                CliOption {
+                    name: "--http".to_string(),
+                    description: "Enable the HTTP RPC server".to_string(),
+                    takes_value: false,
+                    value_name: None,
+                    possible_values: None,
+                    accepts_multiple: false,
+                },
+                CliOption {
+                    name: "--ws".to_string(),
+                    description: "Enable the WebSocket RPC server".to_string(),
+                    takes_value: false,
+                    value_name: None,
+                    possible_values: None,
+                    accepts_multiple: false,
+                },
+                CliOption {
+                    name: "--authrpc.port".to_string(),
+                    description: "The port to listen on for authenticated RPC".to_string(),
+                    takes_value: true,
+                    value_name: Some("PORT".to_string()),
+                    possible_values: None,
+                    accepts_multiple: false,
+                },
+            ]);
+        }
+        
+        options
     }
 }

@@ -5,12 +5,15 @@ use std::path::PathBuf;
 pub struct DesktopSettings {
     #[serde(default)]
     pub keep_reth_running_in_background: bool,
+    #[serde(default)]
+    pub custom_launch_args: Vec<String>,
 }
 
 impl Default for DesktopSettings {
     fn default() -> Self {
         Self {
             keep_reth_running_in_background: false,
+            custom_launch_args: Vec::new(),
         }
     }
 }

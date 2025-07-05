@@ -14,7 +14,7 @@ mod ui;
 use installer::{RethInstaller, InstallStatus};
 use system_check::SystemRequirements;
 use theme::RethTheme;
-use reth_node::{RethNode, LogLine, LogLevel};
+use reth_node::{RethNode, LogLine, LogLevel, CliOption};
 use config::{RethConfig, RethConfigManager};
 use settings::{DesktopSettings, DesktopSettingsManager};
 use ui::{DesktopSettingsWindow, NodeSettingsWindow};
@@ -62,6 +62,13 @@ struct MyApp {
     config_modified: bool,
     settings_edit_mode: bool,
     last_debug_log: std::time::Instant,
+    show_add_parameter: bool,
+    available_cli_options: Vec<reth_node::CliOption>,
+    selected_cli_option: Option<usize>,
+    parameter_value: String,
+    selected_values: Vec<String>,
+    pending_launch_args: Vec<String>,
+    show_restart_prompt: bool,
 }
 
 enum InstallCommand {
@@ -170,7 +177,14 @@ impl MyApp {
             editable_config: reth_config,
             config_modified: false,
             settings_edit_mode: false,
-            last_debug_log: std::time::Instant::now()
+            last_debug_log: std::time::Instant::now(),
+            show_add_parameter: false,
+            available_cli_options: Vec::new(),
+            selected_cli_option: None,
+            parameter_value: String::new(),
+            selected_values: Vec::new(),
+            pending_launch_args: Vec::new(),
+            show_restart_prompt: false
         };
         
         app
@@ -468,9 +482,11 @@ impl MyApp {
             .join("bin")
             .join("reth");
         
-        match self.reth_node.start(&reth_path.to_string_lossy()) {
+        match self.reth_node.start(&reth_path.to_string_lossy(), &self.desktop_settings.custom_launch_args) {
             Ok(()) => {
                 self.install_status = InstallStatus::Running;
+                // Clear pending args since they've been applied
+                self.pending_launch_args.clear();
             }
             Err(e) => {
                 self.install_status = InstallStatus::Error(format!("Failed to launch Reth: {}", e));
@@ -672,6 +688,214 @@ impl eframe::App for MyApp {
                 self.show_settings = false;
             }
         }
+        
+        // Add Parameter window
+        if self.show_add_parameter {
+            let mut open = true;
+            let mut should_add = false;
+            let mut cancel_clicked = false;
+            
+            egui::Window::new("Add Launch Parameter")
+                .resizable(false)
+                .default_width(600.0)
+                .default_height(500.0)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.vertical(|ui| {
+                        ui.label("Select a parameter to add:");
+                        ui.add_space(8.0);
+                        
+                        // ComboBox for parameter selection
+                        egui::ComboBox::from_label("Parameter")
+                            .width(550.0)
+                            .selected_text(
+                                self.selected_cli_option
+                                    .and_then(|i| self.available_cli_options.get(i))
+                                    .map(|opt| opt.name.as_str())
+                                    .unwrap_or("Select...")
+                            )
+                            .show_ui(ui, |ui| {
+                                ui.set_min_width(550.0);
+                                ui.set_min_height(300.0);
+                                for (i, option) in self.available_cli_options.iter().enumerate() {
+                                    // Make the entire line clickable
+                                    let selected = self.selected_cli_option == Some(i);
+                                    
+                                    // Create a clickable area that covers the entire parameter info
+                                    let response = ui.allocate_response(
+                                        egui::Vec2::new(ui.available_width(), 35.0),
+                                        egui::Sense::click()
+                                    );
+                                    
+                                    // Handle selection
+                                    if response.clicked() {
+                                        self.selected_cli_option = Some(i);
+                                        self.parameter_value.clear();
+                                        self.selected_values.clear();
+                                    }
+                                    
+                                    // Draw background if selected
+                                    if selected {
+                                        ui.painter().rect_filled(response.rect, 2.0, egui::Color32::from_rgb(70, 130, 180).linear_multiply(0.2));
+                                    }
+                                    
+                                    // Draw parameter name and description
+                                    ui.allocate_ui_at_rect(response.rect, |ui| {
+                                        ui.vertical(|ui| {
+                                            ui.add_space(4.0);
+                                            ui.label(egui::RichText::new(&option.name).strong());
+                                            
+                                            // Description with indentation
+                                            ui.horizontal(|ui| {
+                                                ui.add_space(16.0); // Indent
+                                                ui.label(egui::RichText::new(&option.description)
+                                                    .size(10.0)
+                                                    .color(egui::Color32::GRAY));
+                                            });
+                                        });
+                                    });
+                                    ui.add_space(4.0);
+                                }
+                            });
+                        
+                        ui.add_space(8.0);
+                        
+                        // Show value input if parameter takes a value
+                        if let Some(selected) = self.selected_cli_option {
+                            if let Some(option) = self.available_cli_options.get(selected) {
+                                if option.takes_value {
+                                    ui.vertical(|ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label("Value:");
+                                            if let Some(value_name) = &option.value_name {
+                                                ui.label(RethTheme::muted_text(&format!("({})", value_name)));
+                                            }
+                                            if option.accepts_multiple {
+                                                ui.label(RethTheme::muted_text("(comma-separated)"));
+                                            }
+                                        });
+                                        
+                                        // Show different UI based on whether it has possible values and accepts multiple
+                                        if let Some(possible_values) = &option.possible_values {
+                                            if !possible_values.is_empty() {
+                                                if option.accepts_multiple {
+                                                    // Multi-select checkboxes for comma-separated values
+                                                    ui.label("Select values:");
+                                                    ui.separator();
+                                                    
+                                                    for value in possible_values {
+                                                        let mut selected = self.selected_values.contains(value);
+                                                        if ui.checkbox(&mut selected, value).changed() {
+                                                            if selected {
+                                                                if !self.selected_values.contains(value) {
+                                                                    self.selected_values.push(value.clone());
+                                                                }
+                                                            } else {
+                                                                self.selected_values.retain(|v| v != value);
+                                                            }
+                                                            // Update parameter_value to be comma-separated
+                                                            self.parameter_value = self.selected_values.join(",");
+                                                        }
+                                                    }
+                                                    
+                                                    if !self.selected_values.is_empty() {
+                                                        ui.add_space(4.0);
+                                                        ui.label(RethTheme::muted_text(&format!("Selected: {}", self.parameter_value)));
+                                                    }
+                                                } else {
+                                                    // Single-select ComboBox
+                                                    egui::ComboBox::from_id_source(format!("value_combo_{}", selected))
+                                                        .width(200.0)
+                                                        .selected_text(
+                                                            if self.parameter_value.is_empty() {
+                                                                "Select..."
+                                                            } else {
+                                                                &self.parameter_value
+                                                            }
+                                                        )
+                                                        .show_ui(ui, |ui| {
+                                                            for value in possible_values {
+                                                                ui.selectable_value(&mut self.parameter_value, value.clone(), value);
+                                                            }
+                                                        });
+                                                }
+                                            } else {
+                                                ui.text_edit_singleline(&mut self.parameter_value);
+                                            }
+                                        } else {
+                                            ui.text_edit_singleline(&mut self.parameter_value);
+                                        }
+                                    });
+                                    
+                                    if self.parameter_value.trim().is_empty() && (!option.accepts_multiple || self.selected_values.is_empty()) {
+                                        ui.label(RethTheme::warning_text("⚠ This parameter requires a value"));
+                                    }
+                                    
+                                    ui.add_space(8.0);
+                                }
+                            }
+                        }
+                        
+                        ui.add_space(16.0);
+                        
+                        ui.horizontal(|ui| {
+                            let can_add = if let Some(selected) = self.selected_cli_option {
+                                if let Some(option) = self.available_cli_options.get(selected) {
+                                    // Can add if it's a flag OR if it requires a value and we have one
+                                    !option.takes_value || 
+                                    (!self.parameter_value.trim().is_empty() || 
+                                     (option.accepts_multiple && !self.selected_values.is_empty()))
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+                            
+                            if ui.add_enabled(can_add, egui::Button::new("Add")).clicked() {
+                                if let Some(selected) = self.selected_cli_option {
+                                    if let Some(option) = self.available_cli_options.get(selected) {
+                                        // Add the parameter
+                                        if option.takes_value {
+                                            if !self.parameter_value.is_empty() {
+                                                self.desktop_settings.custom_launch_args.push(option.name.clone());
+                                                self.desktop_settings.custom_launch_args.push(self.parameter_value.clone());
+                                                // Also add to pending list for immediate display
+                                                self.pending_launch_args.push(option.name.clone());
+                                                self.pending_launch_args.push(self.parameter_value.clone());
+                                            }
+                                        } else {
+                                            // Flag parameter - just add the name
+                                            self.desktop_settings.custom_launch_args.push(option.name.clone());
+                                            // Also add to pending list for immediate display
+                                            self.pending_launch_args.push(option.name.clone());
+                                        }
+                                        
+                                        // Save settings
+                                        if let Err(e) = DesktopSettingsManager::save_desktop_settings(&self.desktop_settings) {
+                                            eprintln!("Failed to save desktop settings: {}", e);
+                                        }
+                                        
+                                        should_add = true;
+                                    }
+                                }
+                            }
+                            
+                            if ui.button("Cancel").clicked() {
+                                cancel_clicked = true;
+                            }
+                        });
+                    });
+                });
+            
+            if should_add || cancel_clicked || !open {
+                self.show_add_parameter = false;
+                self.selected_cli_option = None;
+                self.parameter_value.clear();
+                self.selected_values.clear();
+            }
+        }
+        
 
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical()
@@ -990,6 +1214,283 @@ impl eframe::App for MyApp {
                                 }
                                 
                                 ui.add_space(12.0);
+                                
+                                // Show launch command if available
+                                if let Some(launch_cmd_parts) = self.reth_node.get_launch_command() {
+                                    egui::Frame::none()
+                                        .fill(RethTheme::SURFACE.gamma_multiply(0.5))
+                                        .rounding(4.0)
+                                        .inner_margin(8.0)
+                                        .show(ui, |ui| {
+                                            ui.vertical(|ui| {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(egui::RichText::new("Command:")
+                                                        .size(11.0)
+                                                        .color(egui::Color32::LIGHT_GRAY));
+                                                    
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        // Only show + button for managed processes
+                                                        if !self.reth_node.is_monitoring_external() {
+                                                            if ui.small_button("➕").on_hover_text("Add launch parameter").clicked() {
+                                                                self.show_add_parameter = true;
+                                                                // Load available options if not already loaded
+                                                                if self.available_cli_options.is_empty() {
+                                                                    let reth_path = dirs::home_dir()
+                                                                        .unwrap_or_default()
+                                                                        .join(".reth-desktop")
+                                                                        .join("bin")
+                                                                        .join("reth");
+                                                                    self.available_cli_options = RethNode::get_available_cli_options(&reth_path.to_string_lossy());
+                                                                }
+                                                            }
+                                                        }
+                                                    });
+                                                });
+                                                ui.add_space(4.0);
+                                                
+                                                // Show the executable on its own line
+                                                if let Some(exe) = launch_cmd_parts.first() {
+                                                    ui.label(egui::RichText::new(exe)
+                                                        .size(11.0)
+                                                        .color(egui::Color32::WHITE)
+                                                        .monospace());
+                                                }
+                                                
+                                                // Show each argument on its own line with indentation
+                                                let mut i = 1;
+                                                let mut remove_indices = Vec::new();
+                                                
+                                                while i < launch_cmd_parts.len() {
+                                                    let is_custom = self.desktop_settings.custom_launch_args.contains(&launch_cmd_parts[i]);
+                                                    
+                                                    ui.horizontal(|ui| {
+                                                        ui.add_space(16.0); // Indent
+                                                        
+                                                        let arg = &launch_cmd_parts[i];
+                                                        if arg.starts_with("--") {
+                                                            // This is a parameter name
+                                                            ui.label(egui::RichText::new(arg)
+                                                                .size(11.0)
+                                                                .color(egui::Color32::from_gray(200))
+                                                                .monospace());
+                                                            
+                                                            // Check if next item is the value (not another flag)
+                                                            if i + 1 < launch_cmd_parts.len() && !launch_cmd_parts[i + 1].starts_with("--") {
+                                                                ui.add_space(8.0);
+                                                                ui.label(egui::RichText::new(&launch_cmd_parts[i + 1])
+                                                                    .size(11.0)
+                                                                    .color(egui::Color32::WHITE)
+                                                                    .monospace());
+                                                                
+                                                                // Show remove button for custom args
+                                                                if is_custom && !self.reth_node.is_monitoring_external() {
+                                                                    ui.add_space(8.0);
+                                                                    if ui.small_button("❌").on_hover_text("Remove this parameter").clicked() {
+                                                                        if let Some(pos) = self.desktop_settings.custom_launch_args.iter().position(|x| x == arg) {
+                                                                            remove_indices.push(pos);
+                                                                            // Also remove the value if it exists
+                                                                            if pos + 1 < self.desktop_settings.custom_launch_args.len() {
+                                                                                remove_indices.push(pos + 1);
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                                
+                                                                i += 2; // Skip the value we just printed
+                                                            } else {
+                                                                // Show remove button for custom args
+                                                                if is_custom && !self.reth_node.is_monitoring_external() {
+                                                                    ui.add_space(8.0);
+                                                                    if ui.small_button("❌").on_hover_text("Remove this parameter").clicked() {
+                                                                        if let Some(pos) = self.desktop_settings.custom_launch_args.iter().position(|x| x == arg) {
+                                                                            remove_indices.push(pos);
+                                                                        }
+                                                                    }
+                                                                }
+                                                                i += 1;
+                                                            }
+                                                        } else {
+                                                            // Standalone argument
+                                                            ui.label(egui::RichText::new(arg)
+                                                                .size(11.0)
+                                                                .color(egui::Color32::from_gray(200))
+                                                                .monospace());
+                                                            i += 1;
+                                                        }
+                                                    });
+                                                }
+                                                
+                                                // Remove parameters if any were clicked
+                                                if !remove_indices.is_empty() {
+                                                    // Collect removed parameters to add to pending list
+                                                    let mut removed_params = Vec::new();
+                                                    
+                                                    // Sort in reverse order to remove from end first
+                                                    remove_indices.sort_by(|a, b| b.cmp(a));
+                                                    for idx in remove_indices {
+                                                        if idx < self.desktop_settings.custom_launch_args.len() {
+                                                            // Store the parameter before removing it
+                                                            let removed_param = self.desktop_settings.custom_launch_args[idx].clone();
+                                                            removed_params.push(removed_param);
+                                                            self.desktop_settings.custom_launch_args.remove(idx);
+                                                        }
+                                                    }
+                                                    
+                                                    // Add removed parameters to pending list for restart indication
+                                                    // Only if the node is running and we're not monitoring external
+                                                    if self.reth_node.is_running() && !self.reth_node.is_monitoring_external() && !removed_params.is_empty() {
+                                                        for param in removed_params {
+                                                            // Add a special marker to indicate this is a removal
+                                                            if !self.pending_launch_args.contains(&format!("REMOVE:{}", param)) {
+                                                                self.pending_launch_args.push(format!("REMOVE:{}", param));
+                                                            }
+                                                        }
+                                                    }
+                                                    
+                                                    // Save settings
+                                                    if let Err(e) = DesktopSettingsManager::save_desktop_settings(&self.desktop_settings) {
+                                                        eprintln!("Failed to save desktop settings: {}", e);
+                                                    }
+                                                }
+                                            });
+                                        });
+                                    ui.add_space(8.0);
+                                }
+                                
+                                // Show pending parameters if any
+                                if !self.pending_launch_args.is_empty() {
+                                    egui::Frame::none()
+                                        .fill(egui::Color32::from_rgb(255, 165, 0).linear_multiply(0.1)) // Orange background
+                                        .rounding(4.0)
+                                        .inner_margin(8.0)
+                                        .show(ui, |ui| {
+                                            ui.vertical(|ui| {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(egui::RichText::new("⚠ Pending Changes (will take effect after restart):")
+                                                        .size(11.0)
+                                                        .color(egui::Color32::from_rgb(255, 165, 0)));
+                                                    
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        // Restart Node button - only show if node is running and not monitoring external
+                                                        if self.reth_node.is_running() && !self.reth_node.is_monitoring_external() {
+                                                            if ui.button("🔄 Restart Node").on_hover_text("Restart the node to apply pending parameters").clicked() {
+                                                                self.stop_reth();
+                                                                self.launch_reth();
+                                                                self.pending_launch_args.clear();
+                                                            }
+                                                        }
+                                                    });
+                                                });
+                                                ui.add_space(4.0);
+                                                
+                                                // Show pending arguments
+                                                let mut i = 0;
+                                                let mut remove_pending_indices = Vec::new();
+                                                
+                                                while i < self.pending_launch_args.len() {
+                                                    ui.horizontal(|ui| {
+                                                        ui.add_space(16.0); // Indent
+                                                        
+                                                        let arg = &self.pending_launch_args[i];
+                                                        
+                                                        // Check if this is a removal
+                                                        if arg.starts_with("REMOVE:") {
+                                                            // This is a parameter removal
+                                                            let param_name = &arg[7..]; // Remove "REMOVE:" prefix
+                                                            ui.label("🗑️");
+                                                            ui.label(egui::RichText::new(param_name)
+                                                                .size(11.0)
+                                                                .color(egui::Color32::from_rgb(255, 100, 100))
+                                                                .strikethrough()
+                                                                .monospace());
+                                                            ui.label(egui::RichText::new("(will be removed)")
+                                                                .size(10.0)
+                                                                .color(egui::Color32::from_rgb(255, 100, 100))
+                                                                .italics());
+                                                                
+                                                            // Remove button
+                                                            ui.add_space(8.0);
+                                                            if ui.small_button("❌").on_hover_text("Cancel removal").clicked() {
+                                                                remove_pending_indices.push(i);
+                                                                // Re-add to settings if it was a removal
+                                                                self.desktop_settings.custom_launch_args.push(param_name.to_string());
+                                                                if let Err(e) = DesktopSettingsManager::save_desktop_settings(&self.desktop_settings) {
+                                                                    eprintln!("Failed to save desktop settings: {}", e);
+                                                                }
+                                                            }
+                                                        } else if arg.starts_with("--") {
+                                                            // This is a parameter addition
+                                                            ui.label("➕");
+                                                            ui.label(egui::RichText::new(arg)
+                                                                .size(11.0)
+                                                                .color(egui::Color32::from_rgb(255, 165, 0))
+                                                                .monospace());
+                                                            
+                                                            // Check if next item is the value (not another flag and not a REMOVE entry)
+                                                            if i + 1 < self.pending_launch_args.len() && 
+                                                               !self.pending_launch_args[i + 1].starts_with("--") && 
+                                                               !self.pending_launch_args[i + 1].starts_with("REMOVE:") {
+                                                                ui.add_space(8.0);
+                                                                ui.label(egui::RichText::new(&self.pending_launch_args[i + 1])
+                                                                    .size(11.0)
+                                                                    .color(egui::Color32::from_rgb(255, 200, 100))
+                                                                    .monospace());
+                                                                
+                                                                // Remove button
+                                                                ui.add_space(8.0);
+                                                                if ui.small_button("❌").on_hover_text("Remove this pending parameter").clicked() {
+                                                                    remove_pending_indices.push(i);
+                                                                    remove_pending_indices.push(i + 1); // Remove value too
+                                                                    // Also remove from settings
+                                                                    if let Some(pos) = self.desktop_settings.custom_launch_args.iter().position(|x| x == arg) {
+                                                                        self.desktop_settings.custom_launch_args.remove(pos);
+                                                                        if pos < self.desktop_settings.custom_launch_args.len() {
+                                                                            self.desktop_settings.custom_launch_args.remove(pos);
+                                                                        }
+                                                                        if let Err(e) = DesktopSettingsManager::save_desktop_settings(&self.desktop_settings) {
+                                                                            eprintln!("Failed to save desktop settings: {}", e);
+                                                                        }
+                                                                    }
+                                                                }
+                                                            } else {
+                                                                // Remove button for flag
+                                                                ui.add_space(8.0);
+                                                                if ui.small_button("❌").on_hover_text("Remove this pending parameter").clicked() {
+                                                                    remove_pending_indices.push(i);
+                                                                    // Also remove from settings
+                                                                    if let Some(pos) = self.desktop_settings.custom_launch_args.iter().position(|x| x == arg) {
+                                                                        self.desktop_settings.custom_launch_args.remove(pos);
+                                                                        if let Err(e) = DesktopSettingsManager::save_desktop_settings(&self.desktop_settings) {
+                                                                            eprintln!("Failed to save desktop settings: {}", e);
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        } else {
+                                                            // Standalone argument
+                                                            ui.label(egui::RichText::new(arg)
+                                                                .size(11.0)
+                                                                .color(egui::Color32::from_rgb(255, 165, 0))
+                                                                .monospace());
+                                                        }
+                                                    });
+                                                    i += 1;
+                                                }
+                                                
+                                                // Remove pending parameters if any were clicked
+                                                if !remove_pending_indices.is_empty() {
+                                                    // Sort in reverse order to remove from end first
+                                                    remove_pending_indices.sort_by(|a, b| b.cmp(a));
+                                                    for idx in remove_pending_indices {
+                                                        if idx < self.pending_launch_args.len() {
+                                                            self.pending_launch_args.remove(idx);
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                        });
+                                    ui.add_space(8.0);
+                                }
                                 
                                 // Terminal output - scale with GUI size
                                 let available_rect = ui.available_rect_before_wrap();
