@@ -69,6 +69,7 @@ struct MyApp {
     selected_values: Vec<String>,
     pending_launch_args: Vec<String>,
     show_restart_prompt: bool,
+    command_section_collapsed: bool,
 }
 
 enum InstallCommand {
@@ -184,7 +185,8 @@ impl MyApp {
             parameter_value: String::new(),
             selected_values: Vec::new(),
             pending_launch_args: Vec::new(),
-            show_restart_prompt: false
+            show_restart_prompt: false,
+            command_section_collapsed: true
         };
         
         app
@@ -620,6 +622,8 @@ impl eframe::App for MyApp {
             ui.add_space(8.0);
             ui.vertical_centered(|ui| {
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0; // Consistent spacing between elements
+                    
                     // "Open Source" link
                     let open_source_link = egui::RichText::new("Open Source")
                         .size(12.0)
@@ -631,9 +635,9 @@ impl eframe::App for MyApp {
                             .spawn();
                     }
                     
-                    ui.label(RethTheme::muted_text("and made with"));
-                    ui.label(RethTheme::muted_text("❤️"));
-                    ui.label(RethTheme::muted_text("by"));
+                    ui.label(egui::RichText::new("and made with").size(12.0).color(RethTheme::TEXT_SECONDARY));
+                    ui.label(egui::RichText::new("❤").size(12.0).color(RethTheme::TEXT_SECONDARY)); // Clean heart emoji without extra characters
+                    ui.label(egui::RichText::new("by").size(12.0).color(RethTheme::TEXT_SECONDARY));
                     
                     // "beef" link
                     let beef_link = egui::RichText::new("beef")
@@ -1217,21 +1221,45 @@ impl eframe::App for MyApp {
                                 
                                 // Show launch command if available
                                 if let Some(launch_cmd_parts) = self.reth_node.get_launch_command() {
-                                    egui::Frame::none()
+                                    let response = egui::Frame::none()
                                         .fill(RethTheme::SURFACE.gamma_multiply(0.5))
                                         .rounding(4.0)
                                         .inner_margin(8.0)
                                         .show(ui, |ui| {
                                             ui.vertical(|ui| {
                                                 ui.horizontal(|ui| {
-                                                    ui.label(egui::RichText::new("Command:")
-                                                        .size(11.0)
-                                                        .color(egui::Color32::LIGHT_GRAY));
+                                                    // Make the header clickable
+                                                    let header_response = ui.allocate_response(
+                                                        egui::Vec2::new(ui.available_width() - 100.0, 20.0),
+                                                        egui::Sense::click()
+                                                    );
+                                                    
+                                                    if header_response.clicked() {
+                                                        self.command_section_collapsed = !self.command_section_collapsed;
+                                                    }
+                                                    
+                                                    // Draw the header content
+                                                    ui.allocate_ui_at_rect(header_response.rect, |ui| {
+                                                        ui.horizontal(|ui| {
+                                                            // Collapse/expand arrow
+                                                            ui.label(egui::RichText::new(if self.command_section_collapsed { "▶" } else { "▼" })
+                                                                .size(11.0)
+                                                                .color(egui::Color32::LIGHT_GRAY));
+                                                            
+                                                            ui.label(egui::RichText::new("Command")
+                                                                .size(11.0)
+                                                                .color(egui::Color32::LIGHT_GRAY));
+                                                        });
+                                                    });
                                                     
                                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                         // Only show + button for managed processes
                                                         if !self.reth_node.is_monitoring_external() {
-                                                            if ui.small_button("➕").on_hover_text("Add launch parameter").clicked() {
+                                                            // Add spacing to make the button square with equal padding
+                                                            ui.add_space(2.0);
+                                                            if ui.add_sized([24.0, 20.0], egui::Button::new("➕"))
+                                                                .on_hover_text("Add launch parameter")
+                                                                .clicked() {
                                                                 self.show_add_parameter = true;
                                                                 // Load available options if not already loaded
                                                                 if self.available_cli_options.is_empty() {
@@ -1246,15 +1274,18 @@ impl eframe::App for MyApp {
                                                         }
                                                     });
                                                 });
-                                                ui.add_space(4.0);
                                                 
-                                                // Show the executable on its own line
-                                                if let Some(exe) = launch_cmd_parts.first() {
-                                                    ui.label(egui::RichText::new(exe)
-                                                        .size(11.0)
-                                                        .color(egui::Color32::WHITE)
-                                                        .monospace());
-                                                }
+                                                // Only show command details if not collapsed
+                                                if !self.command_section_collapsed {
+                                                    ui.add_space(4.0);
+                                                    
+                                                    // Show the executable on its own line
+                                                    if let Some(exe) = launch_cmd_parts.first() {
+                                                        ui.label(egui::RichText::new(exe)
+                                                            .size(11.0)
+                                                            .color(egui::Color32::WHITE)
+                                                            .monospace());
+                                                    }
                                                 
                                                 // Show each argument on its own line with indentation
                                                 let mut i = 1;
@@ -1352,6 +1383,7 @@ impl eframe::App for MyApp {
                                                         eprintln!("Failed to save desktop settings: {}", e);
                                                     }
                                                 }
+                                                } // End of collapsed section
                                             });
                                         });
                                     ui.add_space(8.0);

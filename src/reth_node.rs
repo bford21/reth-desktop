@@ -51,6 +51,68 @@ impl LogLevel {
     }
 }
 
+impl LogLine {
+    /// Remove Reth's timestamp from the log content
+    /// Reth timestamps follow the pattern: 2025-07-03T19:20:27.1514252
+    fn clean_reth_timestamp(content: &str) -> String {
+        // Look for the pattern YYYY-MM-DDTHH:MM:SS.microseconds
+        // We'll find the first occurrence and remove everything up to the first space after it
+        
+        // Find a pattern that looks like: 4 digits, dash, 2 digits, dash, 2 digits, T, etc.
+        let mut chars: Vec<char> = content.chars().collect();
+        let len = chars.len();
+        
+        // Look for timestamp pattern starting position
+        for i in 0..len.saturating_sub(19) { // minimum timestamp length is about 19 chars
+            // Check if we have YYYY-MM-DDTHH:MM:SS pattern starting at position i
+            if i + 19 < len &&
+               chars[i].is_ascii_digit() && chars[i+1].is_ascii_digit() && 
+               chars[i+2].is_ascii_digit() && chars[i+3].is_ascii_digit() &&
+               chars[i+4] == '-' &&
+               chars[i+5].is_ascii_digit() && chars[i+6].is_ascii_digit() &&
+               chars[i+7] == '-' &&
+               chars[i+8].is_ascii_digit() && chars[i+9].is_ascii_digit() &&
+               chars[i+10] == 'T' &&
+               chars[i+11].is_ascii_digit() && chars[i+12].is_ascii_digit() &&
+               chars[i+13] == ':' &&
+               chars[i+14].is_ascii_digit() && chars[i+15].is_ascii_digit() &&
+               chars[i+16] == ':' &&
+               chars[i+17].is_ascii_digit() && chars[i+18].is_ascii_digit() {
+                
+                // Found timestamp start, now find where it ends (look for space or next non-timestamp char)
+                let mut end_pos = i + 19;
+                while end_pos < len && (chars[end_pos].is_ascii_digit() || chars[end_pos] == '.') {
+                    end_pos += 1;
+                }
+                
+                // Check for timezone indicator (Z or +/-offset)
+                if end_pos < len && (chars[end_pos] == 'Z' || chars[end_pos] == '+' || chars[end_pos] == '-') {
+                    end_pos += 1;
+                    // If it's + or -, skip the offset (e.g., +00:00)
+                    if end_pos > 0 && (chars[end_pos-1] == '+' || chars[end_pos-1] == '-') {
+                        while end_pos < len && (chars[end_pos].is_ascii_digit() || chars[end_pos] == ':') {
+                            end_pos += 1;
+                        }
+                    }
+                }
+                
+                // Skip any trailing spaces
+                while end_pos < len && chars[end_pos].is_whitespace() {
+                    end_pos += 1;
+                }
+                
+                // Return the string with the timestamp portion removed
+                let before = &content[0..i];
+                let after = &content[end_pos..];
+                return format!("{}{}", before, after).trim().to_string();
+            }
+        }
+        
+        // If no timestamp pattern found, return original content
+        content.to_string()
+    }
+}
+
 pub struct RethNode {
     process: Option<Child>,
     log_buffer: Arc<Mutex<VecDeque<LogLine>>>,
@@ -173,10 +235,11 @@ impl RethNode {
                 let reader = BufReader::new(stdout);
                 for line in reader.lines() {
                     if let Ok(line) = line {
+                        let cleaned_content = LogLine::clean_reth_timestamp(&line);
                         let log_line = LogLine {
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
-                            content: line.clone(),
-                            level: LogLevel::from_content(&line),
+                            content: cleaned_content.clone(),
+                            level: LogLevel::from_content(&cleaned_content),
                         };
                         if sender.send(log_line).is_err() {
                             break;
@@ -193,9 +256,10 @@ impl RethNode {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines() {
                     if let Ok(line) = line {
+                        let cleaned_content = LogLine::clean_reth_timestamp(&line);
                         let log_line = LogLine {
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
-                            content: line.clone(),
+                            content: cleaned_content,
                             level: LogLevel::Error,
                         };
                         if sender.send(log_line).is_err() {
@@ -806,10 +870,11 @@ impl RethNode {
         for line in lines {
             let trimmed = line.trim();
             if !trimmed.is_empty() {
+                let cleaned_content = LogLine::clean_reth_timestamp(trimmed);
                 log_lines.push(LogLine {
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
-                    content: trimmed.to_string(),
-                    level: LogLevel::from_content(trimmed),
+                    content: cleaned_content.clone(),
+                    level: LogLevel::from_content(&cleaned_content),
                 });
             }
         }
@@ -844,10 +909,11 @@ impl RethNode {
                     // Process the new line
                     let trimmed = line.trim();
                     if !trimmed.is_empty() {
+                        let cleaned_content = LogLine::clean_reth_timestamp(trimmed);
                         let log_line = LogLine {
                             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
-                            content: trimmed.to_string(),
-                            level: LogLevel::from_content(trimmed),
+                            content: cleaned_content.clone(),
+                            level: LogLevel::from_content(&cleaned_content),
                         };
                         
                         // Add to buffer
