@@ -160,7 +160,9 @@ impl RethNode {
         let mut command_parts = vec![
             reth_path.to_string(), 
             "node".to_string(), 
-            "--full".to_string(), 
+            "--full".to_string(),
+            "--metrics".to_string(),
+            "127.0.0.1:9001".to_string(), 
             "--log.stdout.format".to_string(), 
             "terminal".to_string()
         ];
@@ -168,6 +170,8 @@ impl RethNode {
         command
             .arg("node")
             .arg("--full")
+            .arg("--metrics")
+            .arg("127.0.0.1:9001")
             .arg("--log.stdout.format")
             .arg("terminal");
         

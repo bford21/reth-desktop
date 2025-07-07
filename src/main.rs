@@ -10,6 +10,7 @@ mod reth_node;
 mod config;
 mod settings;
 mod ui;
+mod metrics;
 
 use installer::{RethInstaller, InstallStatus};
 use system_check::SystemRequirements;
@@ -18,6 +19,7 @@ use reth_node::{RethNode, LogLine, LogLevel, CliOption};
 use config::{RethConfig, RethConfigManager};
 use settings::{DesktopSettings, DesktopSettingsManager};
 use ui::{DesktopSettingsWindow, NodeSettingsWindow};
+use metrics::RethMetrics;
 
 
 fn main() -> Result<(), eframe::Error> {
@@ -70,6 +72,11 @@ struct MyApp {
     pending_launch_args: Vec<String>,
     show_restart_prompt: bool,
     command_section_collapsed: bool,
+    metrics: RethMetrics,
+    metrics_section_collapsed: bool,
+    metrics_poll_sender: Option<mpsc::UnboundedSender<()>>,
+    metrics_receiver: mpsc::UnboundedReceiver<String>,
+    metrics_sender: mpsc::UnboundedSender<String>,
 }
 
 enum InstallCommand {
@@ -82,6 +89,7 @@ impl MyApp {
         let runtime = tokio::runtime::Runtime::new().expect("Unable to create Runtime");
         let (tx, mut rx) = mpsc::unbounded_channel::<InstallCommand>();
         let (update_tx, update_rx) = mpsc::unbounded_channel::<(String, bool)>();
+        let (metrics_tx, metrics_rx) = mpsc::unbounded_channel::<String>();
         
         // Load the Reth logo
         let reth_logo = Self::load_logo(&cc.egui_ctx);
@@ -186,7 +194,12 @@ impl MyApp {
             selected_values: Vec::new(),
             pending_launch_args: Vec::new(),
             show_restart_prompt: false,
-            command_section_collapsed: true
+            command_section_collapsed: true,
+            metrics: RethMetrics::new(),
+            metrics_section_collapsed: false,
+            metrics_poll_sender: None,
+            metrics_receiver: metrics_rx,
+            metrics_sender: metrics_tx
         };
         
         app
@@ -489,6 +502,9 @@ impl MyApp {
                 self.install_status = InstallStatus::Running;
                 // Clear pending args since they've been applied
                 self.pending_launch_args.clear();
+                
+                // Start metrics polling
+                self.start_metrics_polling();
             }
             Err(e) => {
                 self.install_status = InstallStatus::Error(format!("Failed to launch Reth: {}", e));
@@ -509,6 +525,41 @@ impl MyApp {
         self.config_modified = false;
         // Don't reset edit mode here - let the caller decide
     }
+    
+    fn start_metrics_polling(&mut self) {
+        let (tx, mut rx) = mpsc::unbounded_channel::<()>();
+        self.metrics_poll_sender = Some(tx);
+        
+        let metrics_sender = self.metrics_sender.clone();
+        
+        // Spawn a task to poll metrics
+        self._runtime.spawn(async move {
+            // Wait a bit for the node to start
+            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+            
+            loop {
+                // Check if we should stop polling
+                if rx.try_recv().is_ok() {
+                    break;
+                }
+                
+                // Poll metrics
+                match metrics::fetch_metrics("http://127.0.0.1:9001").await {
+                    Ok(metrics_text) => {
+                        // Send metrics to the UI thread
+                        let _ = metrics_sender.send(metrics_text);
+                    }
+                    Err(e) => {
+                        // Node might not be ready yet, that's OK
+                        println!("Metrics not ready yet: {}", e);
+                    }
+                }
+                
+                // Wait before next poll
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
+        });
+    }
 
     fn disconnect_from_external_reth(&mut self) {
         // Disconnect from monitoring external Reth process
@@ -520,6 +571,240 @@ impl MyApp {
     }
     
     // Removed show_settings_content function - functionality moved to NodeSettingsWindow
+    
+    fn show_metrics_section(&mut self, ui: &mut egui::Ui) {
+        let response = egui::Frame::none()
+            .fill(RethTheme::SURFACE.gamma_multiply(0.3))
+            .rounding(8.0)
+            .inner_margin(12.0)
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        // Make the header clickable
+                        let header_response = ui.allocate_response(
+                            egui::Vec2::new(ui.available_width() - 50.0, 24.0),
+                            egui::Sense::click()
+                        );
+                        
+                        if header_response.clicked() {
+                            self.metrics_section_collapsed = !self.metrics_section_collapsed;
+                        }
+                        
+                        // Draw the header content
+                        ui.allocate_ui_at_rect(header_response.rect, |ui| {
+                            ui.horizontal(|ui| {
+                                // Collapse/expand arrow
+                                ui.label(egui::RichText::new(if self.metrics_section_collapsed { "▶" } else { "▼" })
+                                    .size(14.0)
+                                    .color(RethTheme::TEXT_SECONDARY));
+                                
+                                ui.label(egui::RichText::new("Node Metrics")
+                                    .size(16.0)
+                                    .color(RethTheme::TEXT_PRIMARY)
+                                    .strong());
+                                
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.label(egui::RichText::new("Real-time monitoring")
+                                        .size(12.0)
+                                        .color(RethTheme::TEXT_SECONDARY)
+                                        .italics());
+                                });
+                            });
+                        });
+                    });
+                    
+                    // Only show metrics details if not collapsed
+                    if !self.metrics_section_collapsed {
+                        ui.add_space(16.0);
+                        
+                        // Show primary metrics in larger format
+                        ui.horizontal(|ui| {
+                            // Left column - Primary metrics
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("Sync & Network")
+                                    .size(14.0)
+                                    .color(RethTheme::TEXT_SECONDARY)
+                                    .strong());
+                                ui.add_space(8.0);
+                                
+                                self.show_large_metric_card(ui, &self.metrics.sync_progress, true);
+                                ui.add_space(8.0);
+                                self.show_large_metric_card(ui, &self.metrics.peers_connected, false);
+                                ui.add_space(8.0);
+                                self.show_large_metric_card(ui, &self.metrics.block_height, false);
+                            });
+                            
+                            ui.add_space(20.0);
+                            
+                            // Right column - Performance metrics
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("Performance")
+                                    .size(14.0)
+                                    .color(RethTheme::TEXT_SECONDARY)
+                                    .strong());
+                                ui.add_space(8.0);
+                                
+                                self.show_large_metric_card(ui, &self.metrics.memory_usage, false);
+                                ui.add_space(8.0);
+                                self.show_large_metric_card(ui, &self.metrics.gas_price, false);
+                                ui.add_space(8.0);
+                                self.show_large_metric_card(ui, &self.metrics.transactions_per_second, false);
+                            });
+                        });
+                    }
+                });
+            });
+    }
+    
+    fn show_large_metric_card(&self, ui: &mut egui::Ui, metric: &metrics::MetricHistory, is_primary: bool) {
+        let bg_color = if is_primary { RethTheme::PRIMARY.gamma_multiply(0.1) } else { RethTheme::BACKGROUND };
+        let border_color = if is_primary { RethTheme::PRIMARY.gamma_multiply(0.3) } else { RethTheme::BORDER };
+        
+        egui::Frame::none()
+            .fill(bg_color)
+            .rounding(8.0)
+            .inner_margin(16.0)
+            .stroke(egui::Stroke::new(1.5, border_color))
+            .show(ui, |ui| {
+                ui.set_min_size(egui::Vec2::new(280.0, 120.0));
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        // Metric name
+                        ui.label(egui::RichText::new(&metric.name)
+                            .size(13.0)
+                            .color(RethTheme::TEXT_SECONDARY)
+                            .strong());
+                        
+                        ui.add_space(4.0);
+                        
+                        // Current value
+                        let current_value = metric.get_latest().unwrap_or(0.0);
+                        let (value_text, value_color) = if metric.unit == "%" {
+                            let color = if current_value > 95.0 { RethTheme::SUCCESS } 
+                                      else if current_value > 80.0 { RethTheme::WARNING }
+                                      else { RethTheme::TEXT_PRIMARY };
+                            (format!("{:.1}%", current_value), color)
+                        } else if metric.unit == "MB" {
+                            let color = if current_value > 1000.0 { RethTheme::WARNING }
+                                      else if current_value > 2000.0 { RethTheme::ERROR }
+                                      else { RethTheme::TEXT_PRIMARY };
+                            (format!("{:.1} MB", current_value), color)
+                        } else if metric.unit == "gwei" {
+                            (format!("{:.2} gwei", current_value), RethTheme::TEXT_PRIMARY)
+                        } else if metric.unit == "peers" {
+                            let color = if current_value >= 5.0 { RethTheme::SUCCESS }
+                                      else if current_value >= 1.0 { RethTheme::WARNING }
+                                      else { RethTheme::ERROR };
+                            (format!("{:.0}", current_value), color)
+                        } else {
+                            (format!("{:.0} {}", current_value, metric.unit), RethTheme::TEXT_PRIMARY)
+                        };
+                        
+                        ui.label(egui::RichText::new(&value_text)
+                            .size(22.0)
+                            .color(value_color)
+                            .strong());
+                        
+                        ui.add_space(4.0);
+                        
+                        // Description
+                        ui.label(egui::RichText::new(&metric.description)
+                            .size(11.0)
+                            .color(RethTheme::TEXT_SECONDARY));
+                    });
+                    
+                    ui.add_space(16.0);
+                    
+                    // Larger graph on the right
+                    ui.vertical(|ui| {
+                        self.draw_large_graph(ui, metric);
+                    });
+                });
+            });
+    }
+    
+    fn draw_large_graph(&self, ui: &mut egui::Ui, metric: &metrics::MetricHistory) {
+        let desired_size = egui::Vec2::new(140.0, 70.0);
+        let (response, painter) = ui.allocate_painter(desired_size, egui::Sense::hover());
+        
+        if metric.values.is_empty() {
+            // Draw empty state
+            painter.rect_filled(response.rect, 4.0, RethTheme::SURFACE.gamma_multiply(0.5));
+            painter.text(
+                response.rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "No data",
+                egui::FontId::proportional(11.0),
+                RethTheme::TEXT_SECONDARY,
+            );
+            return;
+        }
+        
+        let rect = response.rect;
+        let (min_val, max_val) = metric.get_min_max();
+        let val_range = (max_val - min_val).max(0.1); // Avoid division by zero
+        
+        // Draw background with subtle gradient
+        painter.rect_filled(rect, 4.0, RethTheme::SURFACE.gamma_multiply(0.3));
+        painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, RethTheme::BORDER.gamma_multiply(0.5)));
+        
+        // Draw grid lines for better readability
+        let grid_color = RethTheme::BORDER.gamma_multiply(0.3);
+        for i in 1..4 {
+            let y = rect.top() + (i as f32 / 4.0) * rect.height();
+            painter.line_segment(
+                [egui::Pos2::new(rect.left(), y), egui::Pos2::new(rect.right(), y)],
+                egui::Stroke::new(0.5, grid_color)
+            );
+        }
+        
+        // Draw line graph with gradient fill
+        let points: Vec<egui::Pos2> = metric.values
+            .iter()
+            .enumerate()
+            .map(|(i, value)| {
+                let x = rect.left() + (i as f32 / (metric.values.len() - 1).max(1) as f32) * rect.width();
+                let y = rect.bottom() - ((value.value - min_val) / val_range) as f32 * rect.height();
+                egui::Pos2::new(x, y)
+            })
+            .collect();
+        
+        // Fill area under the curve
+        if points.len() > 1 {
+            let mut fill_points = points.clone();
+            fill_points.push(egui::Pos2::new(rect.right(), rect.bottom()));
+            fill_points.push(egui::Pos2::new(rect.left(), rect.bottom()));
+            painter.add(egui::Shape::convex_polygon(
+                fill_points,
+                RethTheme::PRIMARY.gamma_multiply(0.1),
+                egui::Stroke::NONE,
+            ));
+        }
+        
+        // Draw main line
+        if points.len() > 1 {
+            for i in 0..points.len() - 1 {
+                painter.line_segment(
+                    [points[i], points[i + 1]],
+                    egui::Stroke::new(2.5, RethTheme::PRIMARY)
+                );
+            }
+        }
+        
+        // Draw points with hover effect
+        if response.hovered() {
+            for point in &points {
+                painter.circle_filled(*point, 3.5, RethTheme::PRIMARY);
+                painter.circle_stroke(*point, 3.5, egui::Stroke::new(1.5, RethTheme::BACKGROUND));
+            }
+        } else {
+            // Just show the latest point when not hovered
+            if let Some(last_point) = points.last() {
+                painter.circle_filled(*last_point, 3.0, RethTheme::PRIMARY);
+                painter.circle_stroke(*last_point, 3.0, egui::Stroke::new(1.0, RethTheme::BACKGROUND));
+            }
+        }
+    }
 }
 
 impl eframe::App for MyApp {
@@ -560,6 +845,12 @@ impl eframe::App for MyApp {
         if self.detected_existing_process && !matches!(self.install_status, InstallStatus::Running) {
             self.install_status = InstallStatus::Running;
             self.detected_existing_process = false; // Only do this once
+        }
+        
+        // Process incoming metrics
+        while let Ok(metrics_text) = self.metrics_receiver.try_recv() {
+            self.metrics.update_from_prometheus_text(&metrics_text);
+            self.metrics.mark_polled();
         }
         
         // Update Reth node status and collect logs
@@ -1216,6 +1507,11 @@ impl eframe::App for MyApp {
                                         ui.label(RethTheme::muted_text(&format!("📄 Logging to: {}", log_path.display())));
                                     }
                                 }
+                                
+                                ui.add_space(12.0);
+                                
+                                // Show metrics section
+                                self.show_metrics_section(ui);
                                 
                                 ui.add_space(12.0);
                                 
