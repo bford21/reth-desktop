@@ -1,4 +1,5 @@
 use eframe::egui;
+use egui_plot::{Line, Plot, PlotPoints};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
@@ -15,10 +16,10 @@ mod metrics;
 use installer::{RethInstaller, InstallStatus};
 use system_check::SystemRequirements;
 use theme::RethTheme;
-use reth_node::{RethNode, LogLine, LogLevel, CliOption};
+use reth_node::{RethNode, LogLine, LogLevel};
 use config::{RethConfig, RethConfigManager};
 use settings::{DesktopSettings, DesktopSettingsManager};
-use ui::{DesktopSettingsWindow, NodeSettingsWindow};
+use ui::{DesktopSettingsWindow, NodeSettingsWindow, StartConfigWindow};
 use metrics::RethMetrics;
 
 
@@ -57,6 +58,7 @@ struct MyApp {
     update_available: bool,
     show_settings: bool,
     show_desktop_settings: bool,
+    show_start_config: bool,
     desktop_settings: DesktopSettings,
     reth_config: RethConfig,
     reth_config_path: Option<std::path::PathBuf>,
@@ -103,6 +105,18 @@ impl MyApp {
         
         // Load desktop settings
         let desktop_settings = DesktopSettingsManager::load_desktop_settings();
+        
+        // Load CLI options if Reth is installed
+        let available_cli_options = if is_reth_installed {
+            let reth_path = dirs::home_dir()
+                .unwrap_or_default()
+                .join(".reth-desktop")
+                .join("bin")
+                .join("reth");
+            RethNode::get_available_cli_options(&reth_path.to_string_lossy())
+        } else {
+            Vec::new()
+        };
         
         // Spawn a task to handle installation commands
         runtime.spawn(async move {
@@ -161,7 +175,7 @@ impl MyApp {
             }
         }
         
-        let mut app = Self {
+        let app = Self {
             installer: Arc::new(Mutex::new(RethInstaller::new())),
             install_status: initial_status,
             installing: false,
@@ -180,6 +194,7 @@ impl MyApp {
             update_available: false,
             show_settings: false,
             show_desktop_settings: false,
+            show_start_config: false,
             desktop_settings,
             reth_config: reth_config.clone(),
             reth_config_path,
@@ -188,7 +203,7 @@ impl MyApp {
             settings_edit_mode: false,
             last_debug_log: std::time::Instant::now(),
             show_add_parameter: false,
-            available_cli_options: Vec::new(),
+            available_cli_options,
             selected_cli_option: None,
             parameter_value: String::new(),
             selected_values: Vec::new(),
@@ -497,7 +512,7 @@ impl MyApp {
             .join("bin")
             .join("reth");
         
-        match self.reth_node.start(&reth_path.to_string_lossy(), &self.desktop_settings.custom_launch_args) {
+        match self.reth_node.start(&reth_path.to_string_lossy(), &self.desktop_settings.custom_launch_args, &self.desktop_settings) {
             Ok(()) => {
                 self.install_status = InstallStatus::Running;
                 // Clear pending args since they've been applied
@@ -512,7 +527,18 @@ impl MyApp {
         }
     }
     
+    fn stop_metrics_polling(&mut self) {
+        if let Some(sender) = self.metrics_poll_sender.take() {
+            // Send stop signal to the polling task
+            let _ = sender.send(());
+            println!("Sent stop signal to metrics polling task");
+        }
+    }
+    
     fn stop_reth(&mut self) {
+        // Stop metrics polling first
+        self.stop_metrics_polling();
+        
         if let Err(e) = self.reth_node.stop() {
             eprintln!("Error stopping Reth: {}", e);
         }
@@ -531,6 +557,7 @@ impl MyApp {
         self.metrics_poll_sender = Some(tx);
         
         let metrics_sender = self.metrics_sender.clone();
+        let metrics_url = format!("http://{}", self.desktop_settings.reth_defaults.metrics_address);
         
         // Spawn a task to poll metrics
         self._runtime.spawn(async move {
@@ -544,7 +571,7 @@ impl MyApp {
                 }
                 
                 // Poll metrics
-                match metrics::fetch_metrics("http://127.0.0.1:9001").await {
+                match metrics::fetch_metrics(&metrics_url).await {
                     Ok(metrics_text) => {
                         // Send metrics to the UI thread
                         let _ = metrics_sender.send(metrics_text);
@@ -573,87 +600,183 @@ impl MyApp {
     // Removed show_settings_content function - functionality moved to NodeSettingsWindow
     
     fn show_metrics_section(&mut self, ui: &mut egui::Ui) {
-        let response = egui::Frame::none()
-            .fill(RethTheme::SURFACE.gamma_multiply(0.3))
-            .rounding(8.0)
-            .inner_margin(12.0)
+        // Show metrics in a clean 3x2 grid without collapsible header like in mockup
+        ui.add_space(20.0);
+        
+        // Metrics grid matching mockup design
+        egui::Grid::new("metrics_grid_mockup")
+            .num_columns(3)
+            .spacing([20.0, 20.0])
             .show(ui, |ui| {
+                // Top row - Most important metrics for sync monitoring
+                self.show_mockup_metric_card(ui, &self.metrics.peers_connected);
+                self.show_mockup_metric_card(ui, &self.metrics.block_height);
+                self.show_mockup_metric_card(ui, &self.metrics.sync_progress);
+                ui.end_row();
+                
+                // Bottom row - Resource usage and activity
+                self.show_mockup_metric_card(ui, &self.metrics.memory_usage);
+                self.show_mockup_metric_card(ui, &self.metrics.disk_io); // Active downloads
+                self.show_mockup_metric_card(ui, &self.metrics.transactions_per_second); // TX pool size
+                ui.end_row();
+            });
+    }
+    
+    fn show_mockup_metric_card(&self, ui: &mut egui::Ui, metric: &metrics::MetricHistory) {
+        egui::Frame::none()
+            .fill(RethTheme::SURFACE)
+            .rounding(8.0)
+            .inner_margin(16.0)
+            .stroke(egui::Stroke::new(1.0, RethTheme::PRIMARY.gamma_multiply(0.3)))
+            .show(ui, |ui| {
+                ui.set_min_size(egui::Vec2::new(350.0, 160.0));
                 ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        // Make the header clickable
-                        let header_response = ui.allocate_response(
-                            egui::Vec2::new(ui.available_width() - 50.0, 24.0),
-                            egui::Sense::click()
-                        );
-                        
-                        if header_response.clicked() {
-                            self.metrics_section_collapsed = !self.metrics_section_collapsed;
-                        }
-                        
-                        // Draw the header content
-                        ui.allocate_ui_at_rect(header_response.rect, |ui| {
-                            ui.horizontal(|ui| {
-                                // Collapse/expand arrow
-                                ui.label(egui::RichText::new(if self.metrics_section_collapsed { "▶" } else { "▼" })
-                                    .size(14.0)
-                                    .color(RethTheme::TEXT_SECONDARY));
-                                
-                                ui.label(egui::RichText::new("Node Metrics")
-                                    .size(16.0)
-                                    .color(RethTheme::TEXT_PRIMARY)
-                                    .strong());
-                                
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.label(egui::RichText::new("Real-time monitoring")
-                                        .size(12.0)
-                                        .color(RethTheme::TEXT_SECONDARY)
-                                        .italics());
-                                });
-                            });
-                        });
-                    });
+                    // Header with title
+                    ui.label(egui::RichText::new(&metric.name.to_uppercase())
+                        .size(11.0)
+                        .color(RethTheme::TEXT_SECONDARY)
+                        .strong());
                     
-                    // Only show metrics details if not collapsed
-                    if !self.metrics_section_collapsed {
+                    ui.add_space(8.0);
+                    
+                    // Main content area with value and graph
+                    ui.horizontal(|ui| {
+                        // Left side: Current value
+                        ui.vertical(|ui| {
+                            let current_value = metric.get_latest().unwrap_or(0.0);
+                            let (value_text, value_color) = if metric.unit == "%" {
+                                // Special handling for sync progress
+                                if metric.name == "Sync Progress" && current_value == 0.0 {
+                                    ("Syncing...".to_string(), RethTheme::WARNING)
+                                } else {
+                                    (format!("{:.1}%", current_value), RethTheme::TEXT_PRIMARY)
+                                }
+                            } else if metric.unit == "MB" {
+                                (format!("{:.1} MB", current_value), RethTheme::TEXT_PRIMARY)
+                            } else if metric.unit == "gwei" {
+                                (format!("{:.2} gwei", current_value), RethTheme::TEXT_PRIMARY)
+                            } else if metric.unit == "peers" {
+                                (format!("{:.0}", current_value), RethTheme::TEXT_PRIMARY)
+                            } else if metric.unit == "blocks" {
+                                // Format block numbers
+                                let formatted = if current_value >= 1_000_000.0 {
+                                    format!("{:.2}M", current_value / 1_000_000.0)
+                                } else if current_value >= 1000.0 {
+                                    format!("{:.1}k", current_value / 1000.0)
+                                } else {
+                                    format!("{:.0}", current_value)
+                                };
+                                (formatted, RethTheme::TEXT_PRIMARY)
+                            } else if metric.unit == "txs" {
+                                (format!("{:.0} txs", current_value), RethTheme::TEXT_PRIMARY)
+                            } else {
+                                (format!("{:.0} {}", current_value, metric.unit), RethTheme::TEXT_PRIMARY)
+                            };
+                            
+                            ui.label(egui::RichText::new(&value_text)
+                                .size(24.0)
+                                .color(value_color)
+                                .strong());
+                            
+                            // Show trend if we have enough data
+                            if metric.values.len() >= 2 {
+                                let prev_value = metric.values.get(metric.values.len() - 2).map(|v| v.value).unwrap_or(0.0);
+                                let trend = current_value - prev_value;
+                                if trend > 0.0 {
+                                    ui.label(egui::RichText::new("↑").size(14.0).color(RethTheme::SUCCESS));
+                                } else if trend < 0.0 {
+                                    ui.label(egui::RichText::new("↓").size(14.0).color(RethTheme::ERROR));
+                                } else {
+                                    ui.label(egui::RichText::new("→").size(14.0).color(RethTheme::TEXT_SECONDARY));
+                                }
+                            }
+                        });
+                        
                         ui.add_space(16.0);
                         
-                        // Show primary metrics in larger format
-                        ui.horizontal(|ui| {
-                            // Left column - Primary metrics
-                            ui.vertical(|ui| {
-                                ui.label(egui::RichText::new("Sync & Network")
-                                    .size(14.0)
-                                    .color(RethTheme::TEXT_SECONDARY)
-                                    .strong());
-                                ui.add_space(8.0);
-                                
-                                self.show_large_metric_card(ui, &self.metrics.sync_progress, true);
-                                ui.add_space(8.0);
-                                self.show_large_metric_card(ui, &self.metrics.peers_connected, false);
-                                ui.add_space(8.0);
-                                self.show_large_metric_card(ui, &self.metrics.block_height, false);
-                            });
-                            
-                            ui.add_space(20.0);
-                            
-                            // Right column - Performance metrics
-                            ui.vertical(|ui| {
-                                ui.label(egui::RichText::new("Performance")
-                                    .size(14.0)
-                                    .color(RethTheme::TEXT_SECONDARY)
-                                    .strong());
-                                ui.add_space(8.0);
-                                
-                                self.show_large_metric_card(ui, &self.metrics.memory_usage, false);
-                                ui.add_space(8.0);
-                                self.show_large_metric_card(ui, &self.metrics.gas_price, false);
-                                ui.add_space(8.0);
-                                self.show_large_metric_card(ui, &self.metrics.transactions_per_second, false);
-                            });
-                        });
-                    }
+                        // Right side: Graph
+                        self.draw_metric_graph(ui, metric);
+                    });
                 });
             });
+    }
+    
+    fn draw_metric_graph(&self, ui: &mut egui::Ui, metric: &metrics::MetricHistory) {
+        // Use egui_plot for better graph rendering with axis labels
+        let plot_points: PlotPoints = if metric.values.is_empty() {
+            PlotPoints::new(vec![[0.0, 0.0]])
+        } else {
+            // Convert metric values to plot points with time on x-axis
+            let points: Vec<[f64; 2]> = metric.values
+                .iter()
+                .enumerate()
+                .map(|(i, value)| {
+                    [i as f64, value.value]
+                })
+                .collect();
+            PlotPoints::new(points)
+        };
+        
+        // Configure the plot
+        let line = Line::new(plot_points)
+            .color(RethTheme::PRIMARY)
+            .style(egui_plot::LineStyle::Solid)
+            .width(2.0)
+            .fill(0.0); // Fill to y=0
+        
+        // Clone the unit to avoid lifetime issues
+        let unit = metric.unit.clone();
+        let unit_for_formatter = unit.clone();
+        
+        // Create the plot with proper axis labels and formatting
+        let plot = Plot::new(format!("metric_plot_{}", metric.name))
+            .height(100.0)
+            .width(200.0)
+            .show_axes([true, true])
+            .show_grid([true, true])
+            .include_y(0.0) // Always show y=0
+            .label_formatter(move |_name, value| {
+                // Format the y-axis values based on the metric unit
+                match unit.as_str() {
+                    "%" => format!("{:.0}%", value.y),
+                    "MB" => format!("{:.0} MB", value.y),
+                    "peers" => format!("{:.0}", value.y),
+                    "blocks" => {
+                        if value.y >= 1_000_000.0 {
+                            format!("{:.1}M", value.y / 1_000_000.0)
+                        } else if value.y >= 1000.0 {
+                            format!("{:.1}k", value.y / 1000.0)
+                        } else {
+                            format!("{:.0}", value.y)
+                        }
+                    },
+                    "txs" => format!("{:.0}", value.y),
+                    _ => format!("{:.1}", value.y),
+                }
+            })
+            .x_axis_formatter(|_value, _max_chars, _range| String::new()) // Hide x-axis labels for cleaner look
+            .y_axis_formatter(move |value, _max_chars, _range| {
+                // Simplified y-axis labels
+                match unit_for_formatter.as_str() {
+                    "%" => format!("{:.0}", value),
+                    "MB" => format!("{:.0}", value),
+                    "blocks" => {
+                        if value >= 1_000_000.0 {
+                            format!("{:.1}M", value / 1_000_000.0)
+                        } else if value >= 1000.0 {
+                            format!("{:.0}k", value / 1000.0)
+                        } else {
+                            format!("{:.0}", value)
+                        }
+                    },
+                    _ => format!("{:.0}", value),
+                }
+            });
+        
+        // Show the plot
+        plot.show(ui, |plot_ui| {
+            plot_ui.line(line);
+        });
     }
     
     fn show_large_metric_card(&self, ui: &mut egui::Ui, metric: &metrics::MetricHistory, is_primary: bool) {
@@ -704,13 +827,6 @@ impl MyApp {
                             .size(22.0)
                             .color(value_color)
                             .strong());
-                        
-                        ui.add_space(4.0);
-                        
-                        // Description
-                        ui.label(egui::RichText::new(&metric.description)
-                            .size(11.0)
-                            .color(RethTheme::TEXT_SECONDARY));
                     });
                     
                     ui.add_space(16.0);
@@ -724,86 +840,115 @@ impl MyApp {
     }
     
     fn draw_large_graph(&self, ui: &mut egui::Ui, metric: &metrics::MetricHistory) {
-        let desired_size = egui::Vec2::new(140.0, 70.0);
-        let (response, painter) = ui.allocate_painter(desired_size, egui::Sense::hover());
-        
-        if metric.values.is_empty() {
-            // Draw empty state
-            painter.rect_filled(response.rect, 4.0, RethTheme::SURFACE.gamma_multiply(0.5));
-            painter.text(
-                response.rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "No data",
-                egui::FontId::proportional(11.0),
-                RethTheme::TEXT_SECONDARY,
-            );
-            return;
-        }
-        
-        let rect = response.rect;
-        let (min_val, max_val) = metric.get_min_max();
-        let val_range = (max_val - min_val).max(0.1); // Avoid division by zero
-        
-        // Draw background with subtle gradient
-        painter.rect_filled(rect, 4.0, RethTheme::SURFACE.gamma_multiply(0.3));
-        painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, RethTheme::BORDER.gamma_multiply(0.5)));
-        
-        // Draw grid lines for better readability
-        let grid_color = RethTheme::BORDER.gamma_multiply(0.3);
-        for i in 1..4 {
-            let y = rect.top() + (i as f32 / 4.0) * rect.height();
-            painter.line_segment(
-                [egui::Pos2::new(rect.left(), y), egui::Pos2::new(rect.right(), y)],
-                egui::Stroke::new(0.5, grid_color)
-            );
-        }
-        
-        // Draw line graph with gradient fill
-        let points: Vec<egui::Pos2> = metric.values
-            .iter()
-            .enumerate()
-            .map(|(i, value)| {
-                let x = rect.left() + (i as f32 / (metric.values.len() - 1).max(1) as f32) * rect.width();
-                let y = rect.bottom() - ((value.value - min_val) / val_range) as f32 * rect.height();
-                egui::Pos2::new(x, y)
-            })
-            .collect();
-        
-        // Fill area under the curve
-        if points.len() > 1 {
-            let mut fill_points = points.clone();
-            fill_points.push(egui::Pos2::new(rect.right(), rect.bottom()));
-            fill_points.push(egui::Pos2::new(rect.left(), rect.bottom()));
-            painter.add(egui::Shape::convex_polygon(
-                fill_points,
-                RethTheme::PRIMARY.gamma_multiply(0.1),
-                egui::Stroke::NONE,
-            ));
-        }
-        
-        // Draw main line
-        if points.len() > 1 {
-            for i in 0..points.len() - 1 {
-                painter.line_segment(
-                    [points[i], points[i + 1]],
-                    egui::Stroke::new(2.5, RethTheme::PRIMARY)
-                );
-            }
-        }
-        
-        // Draw points with hover effect
-        if response.hovered() {
-            for point in &points {
-                painter.circle_filled(*point, 3.5, RethTheme::PRIMARY);
-                painter.circle_stroke(*point, 3.5, egui::Stroke::new(1.5, RethTheme::BACKGROUND));
-            }
+        // Use egui_plot for large graph with full axis labels
+        let plot_points: PlotPoints = if metric.values.is_empty() {
+            PlotPoints::new(vec![[0.0, 0.0]])
         } else {
-            // Just show the latest point when not hovered
-            if let Some(last_point) = points.last() {
-                painter.circle_filled(*last_point, 3.0, RethTheme::PRIMARY);
-                painter.circle_stroke(*last_point, 3.0, egui::Stroke::new(1.0, RethTheme::BACKGROUND));
-            }
-        }
+            // Convert metric values to plot points with time on x-axis
+            let points: Vec<[f64; 2]> = metric.values
+                .iter()
+                .enumerate()
+                .map(|(i, value)| {
+                    // Use seconds ago for x-axis
+                    let seconds_ago = (metric.values.len() - 1 - i) as f64;
+                    [-seconds_ago, value.value]
+                })
+                .collect();
+            PlotPoints::new(points)
+        };
+        
+        // Configure the plot line
+        let line = Line::new(plot_points)
+            .color(RethTheme::PRIMARY)
+            .style(egui_plot::LineStyle::Solid)
+            .width(2.5)
+            .fill(0.0); // Fill to y=0
+        
+        // Clone the unit to avoid lifetime issues
+        let unit = metric.unit.clone();
+        let unit_for_formatter = unit.clone();
+        let unit_for_hover = unit.clone();
+        
+        // Create a larger plot with full labels
+        let plot = Plot::new(format!("large_metric_plot_{}", metric.name))
+            .height(120.0)
+            .width(240.0)
+            .show_axes([true, true])
+            .show_grid([true, true])
+            .include_y(0.0) // Always show y=0
+            .show_background(true)
+            .label_formatter(move |_name, value| {
+                // Detailed hover information
+                let time_label = if value.x == 0.0 {
+                    "Now".to_string()
+                } else {
+                    format!("{}s ago", -value.x as i64)
+                };
+                
+                let value_label = match unit_for_hover.as_str() {
+                    "%" => format!("{:.1}%", value.y),
+                    "MB" => format!("{:.1} MB", value.y),
+                    "peers" => format!("{:.0} peers", value.y),
+                    "blocks" => {
+                        if value.y >= 1_000_000.0 {
+                            format!("{:.2}M blocks", value.y / 1_000_000.0)
+                        } else if value.y >= 1000.0 {
+                            format!("{:.1}k blocks", value.y / 1000.0)
+                        } else {
+                            format!("{:.0} blocks", value.y)
+                        }
+                    },
+                    "txs" => format!("{:.0} txs", value.y),
+                    "gwei" => format!("{:.2} gwei", value.y),
+                    _ => format!("{:.2} {}", value.y, unit_for_hover),
+                };
+                
+                format!("{}\n{}", time_label, value_label)
+            })
+            .x_axis_formatter(|value, _max_chars, _range| {
+                // Show time labels on x-axis
+                if value == 0.0 {
+                    "Now".to_string()
+                } else if value == -60.0 {
+                    "60s".to_string()
+                } else if value == -30.0 {
+                    "30s".to_string()
+                } else {
+                    String::new()
+                }
+            })
+            .y_axis_formatter(move |value, _max_chars, _range| {
+                // Format y-axis based on metric type
+                match unit_for_formatter.as_str() {
+                    "%" => format!("{:.0}%", value),
+                    "MB" => format!("{:.0}", value),
+                    "blocks" => {
+                        if value >= 1_000_000.0 {
+                            format!("{:.1}M", value / 1_000_000.0)
+                        } else if value >= 1000.0 {
+                            format!("{:.0}k", value / 1000.0)
+                        } else {
+                            format!("{:.0}", value)
+                        }
+                    },
+                    _ => format!("{:.0}", value),
+                }
+            })
+            .x_grid_spacer(|_grid_input| {
+                // Custom grid spacing for x-axis
+                vec![
+                    egui_plot::GridMark { value: 0.0, step_size: 15.0 },
+                    egui_plot::GridMark { value: -15.0, step_size: 15.0 },
+                    egui_plot::GridMark { value: -30.0, step_size: 15.0 },
+                    egui_plot::GridMark { value: -45.0, step_size: 15.0 },
+                    egui_plot::GridMark { value: -60.0, step_size: 15.0 },
+                ]
+            });
+        
+        // Show the plot
+        plot.show(ui, |plot_ui| {
+            plot_ui.line(line);
+        });
     }
 }
 
@@ -904,6 +1049,19 @@ impl eframe::App for MyApp {
                         self.reset_editable_config(); // Reset to current saved state when opening
                         ui.close_menu();
                     }
+                    if ui.button("Start Config").clicked() {
+                        self.show_start_config = true;
+                        // Load CLI options if they're not already loaded
+                        if self.available_cli_options.is_empty() && self.is_reth_installed {
+                            let reth_path = dirs::home_dir()
+                                .unwrap_or_default()
+                                .join(".reth-desktop")
+                                .join("bin")
+                                .join("reth");
+                            self.available_cli_options = RethNode::get_available_cli_options(&reth_path.to_string_lossy());
+                        }
+                        ui.close_menu();
+                    }
                 });
             });
         });
@@ -981,6 +1139,63 @@ impl eframe::App for MyApp {
                 });
             if !open {
                 self.show_settings = false;
+            }
+        }
+        
+        // Start Config window
+        if self.show_start_config {
+            let mut open = true;
+            let mut restart_requested = false;
+            egui::Window::new("Start Configuration")
+                .resizable(true)
+                .default_width(1200.0)
+                .default_height(800.0)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    restart_requested = StartConfigWindow::show_content(
+                        ui,
+                        &self.reth_node,
+                        &mut self.desktop_settings,
+                        &self.available_cli_options,
+                        &mut self.selected_cli_option,
+                        &mut self.parameter_value,
+                        &mut self.selected_values,
+                        &mut self.pending_launch_args,
+                    );
+                });
+            if !open {
+                self.show_start_config = false;
+            }
+            
+            // Handle restart request
+            if restart_requested {
+                if self.reth_node.is_running() {
+                    // Stop the current node
+                    if let Err(e) = self.reth_node.stop() {
+                        eprintln!("Failed to stop Reth node: {}", e);
+                    } else {
+                        self.install_status = InstallStatus::Stopped;
+                        self.stop_metrics_polling();
+                        
+                        // Start the node again with new parameters
+                        let reth_path = dirs::home_dir()
+                            .unwrap_or_default()
+                            .join(".reth-desktop")
+                            .join("bin")
+                            .join("reth");
+                        
+                        match self.reth_node.start(&reth_path.to_string_lossy(), &self.pending_launch_args, &self.desktop_settings) {
+                            Ok(()) => {
+                                self.install_status = InstallStatus::Running;
+                                self.pending_launch_args.clear();
+                                self.start_metrics_polling();
+                            }
+                            Err(e) => {
+                                self.install_status = InstallStatus::Error(format!("Failed to restart Reth: {}", e));
+                            }
+                        }
+                    }
+                }
             }
         }
         
@@ -1196,31 +1411,103 @@ impl eframe::App for MyApp {
             egui::ScrollArea::vertical()
                 .auto_shrink([false; 2])
                 .show(ui, |ui| {
-                    ui.add_space(40.0);
+                    ui.add_space(20.0);
                     
-                    // Header section with Reth branding and logo
-                    ui.vertical_centered(|ui| {
-                        // Display logo if available
+                    // Modern header with logo and status indicator
+                    ui.horizontal(|ui| {
+                        // Add space before logo
+                        ui.add_space(20.0);
+                        
+                        // Logo on the left
                         if let Some(logo_texture) = &self.reth_logo {
                             let logo_size = logo_texture.size_vec2();
-                            // Scale the logo to a reasonable size (max 200px width)
-                            let scale = (200.0 / logo_size.x).min(1.0);
+                            // Scale the logo to a reasonable size (max 50px height for header)
+                            let scale = (50.0 / logo_size.y).min(1.0);
                             let display_size = logo_size * scale;
                             
                             ui.add(egui::Image::new(logo_texture).max_size(display_size));
                             ui.add_space(16.0);
-                        } else {
-                            // Fallback text header if image fails to load
-                            ui.label(RethTheme::heading_text("RETH"));
-                            ui.add_space(8.0);
                         }
                         
-                        ui.label(RethTheme::muted_text("Rust Ethereum Execution Client"));
-                        ui.add_space(4.0);
-                        ui.label(RethTheme::muted_text("Modular, contributor-friendly and blazing-fast"));
+                        // Header text
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new("Ethereum Execution Client")
+                                .size(24.0)
+                                .color(RethTheme::TEXT_PRIMARY)
+                                .strong());
+                            ui.label(egui::RichText::new("Fast, lightweight desktop client")
+                                .size(14.0)
+                                .color(RethTheme::TEXT_SECONDARY));
+                        });
+                        
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // Add space to the right of the status section
+                            ui.add_space(20.0);
+                            
+                            // Status indicator and controls
+                            if self.reth_node.is_running() {
+                                if ui.add(egui::Button::new(egui::RichText::new("Stop")
+                                    .color(egui::Color32::WHITE))
+                                    .fill(RethTheme::ERROR)
+                                    .rounding(6.0)
+                                    .min_size(egui::Vec2::new(60.0, 32.0)))
+                                    .clicked() {
+                                    self.stop_reth();
+                                }
+                                
+                                ui.add_space(12.0);
+                                
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::widgets::Spinner::new().size(12.0).color(RethTheme::SUCCESS));
+                                    ui.add_space(8.0);
+                                    ui.label(egui::RichText::new("Node Running")
+                                        .size(14.0)
+                                        .color(RethTheme::SUCCESS)
+                                        .strong());
+                                });
+                            } else {
+                                if ui.add(egui::Button::new(egui::RichText::new("Start")
+                                    .color(egui::Color32::WHITE))
+                                    .fill(RethTheme::SUCCESS)
+                                    .rounding(6.0)
+                                    .min_size(egui::Vec2::new(60.0, 32.0)))
+                                    .clicked() {
+                                    let reth_path = dirs::home_dir()
+                                        .unwrap_or_default()
+                                        .join(".reth-desktop")
+                                        .join("bin")
+                                        .join("reth");
+                                    match self.reth_node.start(&reth_path.to_string_lossy(), &self.pending_launch_args, &self.desktop_settings) {
+                                        Ok(()) => {
+                                            self.install_status = InstallStatus::Running;
+                                            // Clear pending args since they've been applied
+                                            self.pending_launch_args.clear();
+                                            
+                                            // Start metrics polling
+                                            self.start_metrics_polling();
+                                        }
+                                        Err(e) => {
+                                            self.install_status = InstallStatus::Error(format!("Failed to launch Reth: {}", e));
+                                            println!("Failed to start Reth: {}", e);
+                                        }
+                                    }
+                                }
+                                
+                                ui.add_space(12.0);
+                                
+                                ui.label(egui::RichText::new("Node Stopped")
+                                    .size(14.0)
+                                    .color(RethTheme::TEXT_SECONDARY));
+                            }
+                        });
                     });
                     
-                    ui.add_space(40.0);
+                    ui.add_space(20.0);
+                    
+                    // Horizontal line separator below header
+                    ui.separator();
+                    
+                    ui.add_space(30.0);
             
             // Main content area
             ui.vertical_centered_justified(|ui| {
@@ -1400,547 +1687,95 @@ impl eframe::App for MyApp {
                             });
                         ctx.request_repaint_after(std::time::Duration::from_millis(100));
                     }
-                    InstallStatus::Completed => {
-                        egui::Frame::none()
-                            .fill(RethTheme::SUCCESS.gamma_multiply(0.1))
-                            .rounding(8.0)
-                            .inner_margin(20.0)
-                            .stroke(egui::Stroke::new(1.0, RethTheme::SUCCESS))
-                            .show(ui, |ui| {
-                                ui.set_max_width(max_width);
-                                ui.vertical_centered(|ui| {
-                                    // Show different message based on whether this was a fresh install or detected install
-                                    if self.was_detected_on_startup {
-                                        ui.label(RethTheme::success_text("✓ Reth Installation Detected"));
-                                        ui.add_space(8.0);
-                                        ui.label(RethTheme::muted_text("Reth is ready to launch from ~/.reth-desktop/bin/"));
-                                    } else {
-                                        ui.label(RethTheme::success_text("✓ Installation Completed!"));
-                                        ui.add_space(8.0);
-                                        ui.label(RethTheme::muted_text("Reth has been installed to ~/.reth-desktop/bin/"));
-                                    }
-                                    
-                                    ui.add_space(16.0);
-                                    
-                                    let launch_button = egui::Button::new(
-                                        egui::RichText::new("Launch Reth")
-                                            .size(16.0)
-                                            .color(RethTheme::TEXT_PRIMARY)
-                                    )
-                                    .min_size(egui::vec2(160.0, 40.0))
-                                    .fill(RethTheme::PRIMARY);
-                                    
-                                    if ui.add(launch_button).clicked() {
-                                        self.launch_reth();
-                                    }
-                                    
-                                    ui.add_space(8.0);
-                                    
-                                    // Show Update button only if an update is available
-                                    if self.update_available {
-                                        let update_button = egui::Button::new(
-                                            egui::RichText::new("Update Reth")
-                                                .size(14.0)
-                                                .color(RethTheme::WARNING)
-                                        )
-                                        .min_size(egui::vec2(120.0, 32.0))
-                                        .fill(RethTheme::WARNING.gamma_multiply(0.2));
-                                        
-                                        if ui.add(update_button).clicked() {
-                                            self.install_status = InstallStatus::Idle;
-                                            self.is_reth_installed = false; // Allow update installation
-                                            self.was_detected_on_startup = false; // Reset detection flag
-                                            self.reset_installer();
-                                        }
-                                        
-                                        if let (Some(installed), Some(latest)) = (&self.installed_version, &self.latest_version) {
-                                            ui.add_space(4.0);
-                                            ui.label(RethTheme::muted_text(&format!("Current: {} → Latest: {}", installed, latest)));
-                                        }
-                                    }
-                                });
-                            });
-                    }
                     InstallStatus::Running => {
-                        // Terminal interface for Reth output
+                        // Show metrics section
+                        ui.set_max_width(max_width);
+                        self.show_metrics_section(ui);
+                        
+                        ui.add_space(12.0);
+                        
+                        // Command Terminal section matching mockup
+                        ui.add_space(20.0);
+                        
+                        // Terminal output matching mockup style
+                        let _available_rect = ui.available_rect_before_wrap();
+                        let terminal_height = 300.0; // Increased height for better visibility
+                        
                         egui::Frame::none()
-                            .fill(RethTheme::BACKGROUND)
+                            .fill(RethTheme::SURFACE)
                             .rounding(8.0)
                             .inner_margin(16.0)
                             .stroke(egui::Stroke::new(1.0, RethTheme::BORDER))
                             .show(ui, |ui| {
-                                ui.set_max_width(max_width);
-                                
-                                ui.horizontal(|ui| {
-                                    // Show different status based on whether we own the process
-                                    if self.reth_node.is_monitoring_external() {
-                                        ui.label(RethTheme::success_text("🟢 Monitoring External Reth Process"));
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            let disconnect_button = egui::Button::new(RethTheme::warning_text("Disconnect"))
-                                                .min_size(egui::vec2(80.0, 24.0));
-                                            
-                                            if ui.add(disconnect_button).clicked() {
-                                                self.install_status = InstallStatus::Completed;
-                                                // We need a method to disconnect from external process
-                                                self.disconnect_from_external_reth();
-                                            }
-                                        });
-                                    } else {
-                                        ui.label(RethTheme::success_text("🟢 Reth Node Running"));
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            let stop_button = egui::Button::new(RethTheme::error_text("Stop"))
-                                                .min_size(egui::vec2(60.0, 24.0));
-                                            
-                                            if ui.add(stop_button).clicked() {
-                                                self.stop_reth();
-                                            }
-                                        });
-                                    }
-                                });
-                                
-                                // Show log file path if we have one (for both external and managed processes)
-                                if let Some(log_path) = self.reth_node.get_external_log_path() {
-                                    ui.add_space(4.0);
-                                    if self.reth_node.is_monitoring_external() {
-                                        ui.label(RethTheme::muted_text(&format!("📄 Tailing log file: {}", log_path.display())));
-                                    } else {
-                                        ui.label(RethTheme::muted_text(&format!("📄 Logging to: {}", log_path.display())));
-                                    }
-                                }
-                                
-                                ui.add_space(12.0);
-                                
-                                // Show metrics section
-                                self.show_metrics_section(ui);
-                                
-                                ui.add_space(12.0);
-                                
-                                // Show launch command if available
-                                if let Some(launch_cmd_parts) = self.reth_node.get_launch_command() {
-                                    let response = egui::Frame::none()
-                                        .fill(RethTheme::SURFACE.gamma_multiply(0.5))
-                                        .rounding(4.0)
-                                        .inner_margin(8.0)
-                                        .show(ui, |ui| {
-                                            ui.vertical(|ui| {
-                                                ui.horizontal(|ui| {
-                                                    // Make the header clickable
-                                                    let header_response = ui.allocate_response(
-                                                        egui::Vec2::new(ui.available_width() - 100.0, 20.0),
-                                                        egui::Sense::click()
-                                                    );
-                                                    
-                                                    if header_response.clicked() {
-                                                        self.command_section_collapsed = !self.command_section_collapsed;
-                                                    }
-                                                    
-                                                    // Draw the header content
-                                                    ui.allocate_ui_at_rect(header_response.rect, |ui| {
-                                                        ui.horizontal(|ui| {
-                                                            // Collapse/expand arrow
-                                                            ui.label(egui::RichText::new(if self.command_section_collapsed { "▶" } else { "▼" })
-                                                                .size(11.0)
-                                                                .color(egui::Color32::LIGHT_GRAY));
-                                                            
-                                                            ui.label(egui::RichText::new("Command")
-                                                                .size(11.0)
-                                                                .color(egui::Color32::LIGHT_GRAY));
-                                                        });
-                                                    });
-                                                    
-                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                        // Only show + button for managed processes
-                                                        if !self.reth_node.is_monitoring_external() {
-                                                            // Add spacing to make the button square with equal padding
-                                                            ui.add_space(2.0);
-                                                            if ui.add_sized([24.0, 20.0], egui::Button::new("➕"))
-                                                                .on_hover_text("Add launch parameter")
-                                                                .clicked() {
-                                                                self.show_add_parameter = true;
-                                                                // Load available options if not already loaded
-                                                                if self.available_cli_options.is_empty() {
-                                                                    let reth_path = dirs::home_dir()
-                                                                        .unwrap_or_default()
-                                                                        .join(".reth-desktop")
-                                                                        .join("bin")
-                                                                        .join("reth");
-                                                                    self.available_cli_options = RethNode::get_available_cli_options(&reth_path.to_string_lossy());
-                                                                }
-                                                            }
-                                                        }
-                                                    });
-                                                });
-                                                
-                                                // Only show command details if not collapsed
-                                                if !self.command_section_collapsed {
-                                                    ui.add_space(4.0);
-                                                    
-                                                    // Show the executable on its own line
-                                                    if let Some(exe) = launch_cmd_parts.first() {
-                                                        ui.label(egui::RichText::new(exe)
-                                                            .size(11.0)
-                                                            .color(egui::Color32::WHITE)
-                                                            .monospace());
-                                                    }
-                                                
-                                                // Show each argument on its own line with indentation
-                                                let mut i = 1;
-                                                let mut remove_indices = Vec::new();
-                                                
-                                                while i < launch_cmd_parts.len() {
-                                                    let is_custom = self.desktop_settings.custom_launch_args.contains(&launch_cmd_parts[i]);
-                                                    
-                                                    ui.horizontal(|ui| {
-                                                        ui.add_space(16.0); // Indent
-                                                        
-                                                        let arg = &launch_cmd_parts[i];
-                                                        if arg.starts_with("--") {
-                                                            // This is a parameter name
-                                                            ui.label(egui::RichText::new(arg)
-                                                                .size(11.0)
-                                                                .color(egui::Color32::from_gray(200))
-                                                                .monospace());
-                                                            
-                                                            // Check if next item is the value (not another flag)
-                                                            if i + 1 < launch_cmd_parts.len() && !launch_cmd_parts[i + 1].starts_with("--") {
-                                                                ui.add_space(8.0);
-                                                                ui.label(egui::RichText::new(&launch_cmd_parts[i + 1])
-                                                                    .size(11.0)
-                                                                    .color(egui::Color32::WHITE)
-                                                                    .monospace());
-                                                                
-                                                                // Show remove button for custom args
-                                                                if is_custom && !self.reth_node.is_monitoring_external() {
-                                                                    ui.add_space(8.0);
-                                                                    if ui.small_button("❌").on_hover_text("Remove this parameter").clicked() {
-                                                                        if let Some(pos) = self.desktop_settings.custom_launch_args.iter().position(|x| x == arg) {
-                                                                            remove_indices.push(pos);
-                                                                            // Also remove the value if it exists
-                                                                            if pos + 1 < self.desktop_settings.custom_launch_args.len() {
-                                                                                remove_indices.push(pos + 1);
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                }
-                                                                
-                                                                i += 2; // Skip the value we just printed
-                                                            } else {
-                                                                // Show remove button for custom args
-                                                                if is_custom && !self.reth_node.is_monitoring_external() {
-                                                                    ui.add_space(8.0);
-                                                                    if ui.small_button("❌").on_hover_text("Remove this parameter").clicked() {
-                                                                        if let Some(pos) = self.desktop_settings.custom_launch_args.iter().position(|x| x == arg) {
-                                                                            remove_indices.push(pos);
-                                                                        }
-                                                                    }
-                                                                }
-                                                                i += 1;
-                                                            }
-                                                        } else {
-                                                            // Standalone argument
-                                                            ui.label(egui::RichText::new(arg)
-                                                                .size(11.0)
-                                                                .color(egui::Color32::from_gray(200))
-                                                                .monospace());
-                                                            i += 1;
-                                                        }
-                                                    });
-                                                }
-                                                
-                                                // Remove parameters if any were clicked
-                                                if !remove_indices.is_empty() {
-                                                    // Collect removed parameters to add to pending list
-                                                    let mut removed_params = Vec::new();
-                                                    
-                                                    // Sort in reverse order to remove from end first
-                                                    remove_indices.sort_by(|a, b| b.cmp(a));
-                                                    for idx in remove_indices {
-                                                        if idx < self.desktop_settings.custom_launch_args.len() {
-                                                            // Store the parameter before removing it
-                                                            let removed_param = self.desktop_settings.custom_launch_args[idx].clone();
-                                                            removed_params.push(removed_param);
-                                                            self.desktop_settings.custom_launch_args.remove(idx);
-                                                        }
-                                                    }
-                                                    
-                                                    // Add removed parameters to pending list for restart indication
-                                                    // Only if the node is running and we're not monitoring external
-                                                    if self.reth_node.is_running() && !self.reth_node.is_monitoring_external() && !removed_params.is_empty() {
-                                                        for param in removed_params {
-                                                            // Add a special marker to indicate this is a removal
-                                                            if !self.pending_launch_args.contains(&format!("REMOVE:{}", param)) {
-                                                                self.pending_launch_args.push(format!("REMOVE:{}", param));
-                                                            }
-                                                        }
-                                                    }
-                                                    
-                                                    // Save settings
-                                                    if let Err(e) = DesktopSettingsManager::save_desktop_settings(&self.desktop_settings) {
-                                                        eprintln!("Failed to save desktop settings: {}", e);
-                                                    }
-                                                }
-                                                } // End of collapsed section
-                                            });
-                                        });
-                                    ui.add_space(8.0);
-                                }
-                                
-                                // Show pending parameters if any
-                                if !self.pending_launch_args.is_empty() {
-                                    egui::Frame::none()
-                                        .fill(egui::Color32::from_rgb(255, 165, 0).linear_multiply(0.1)) // Orange background
-                                        .rounding(4.0)
-                                        .inner_margin(8.0)
-                                        .show(ui, |ui| {
-                                            ui.vertical(|ui| {
-                                                ui.horizontal(|ui| {
-                                                    ui.label(egui::RichText::new("⚠ Pending Changes (will take effect after restart):")
-                                                        .size(11.0)
-                                                        .color(egui::Color32::from_rgb(255, 165, 0)));
-                                                    
-                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                        // Restart Node button - only show if node is running and not monitoring external
-                                                        if self.reth_node.is_running() && !self.reth_node.is_monitoring_external() {
-                                                            if ui.button("🔄 Restart Node").on_hover_text("Restart the node to apply pending parameters").clicked() {
-                                                                self.stop_reth();
-                                                                self.launch_reth();
-                                                                self.pending_launch_args.clear();
-                                                            }
-                                                        }
-                                                    });
-                                                });
-                                                ui.add_space(4.0);
-                                                
-                                                // Show pending arguments
-                                                let mut i = 0;
-                                                let mut remove_pending_indices = Vec::new();
-                                                
-                                                while i < self.pending_launch_args.len() {
-                                                    ui.horizontal(|ui| {
-                                                        ui.add_space(16.0); // Indent
-                                                        
-                                                        let arg = &self.pending_launch_args[i];
-                                                        
-                                                        // Check if this is a removal
-                                                        if arg.starts_with("REMOVE:") {
-                                                            // This is a parameter removal
-                                                            let param_name = &arg[7..]; // Remove "REMOVE:" prefix
-                                                            ui.label("🗑️");
-                                                            ui.label(egui::RichText::new(param_name)
-                                                                .size(11.0)
-                                                                .color(egui::Color32::from_rgb(255, 100, 100))
-                                                                .strikethrough()
-                                                                .monospace());
-                                                            ui.label(egui::RichText::new("(will be removed)")
-                                                                .size(10.0)
-                                                                .color(egui::Color32::from_rgb(255, 100, 100))
-                                                                .italics());
-                                                                
-                                                            // Remove button
-                                                            ui.add_space(8.0);
-                                                            if ui.small_button("❌").on_hover_text("Cancel removal").clicked() {
-                                                                remove_pending_indices.push(i);
-                                                                // Re-add to settings if it was a removal
-                                                                self.desktop_settings.custom_launch_args.push(param_name.to_string());
-                                                                if let Err(e) = DesktopSettingsManager::save_desktop_settings(&self.desktop_settings) {
-                                                                    eprintln!("Failed to save desktop settings: {}", e);
-                                                                }
-                                                            }
-                                                        } else if arg.starts_with("--") {
-                                                            // This is a parameter addition
-                                                            ui.label("➕");
-                                                            ui.label(egui::RichText::new(arg)
-                                                                .size(11.0)
-                                                                .color(egui::Color32::from_rgb(255, 165, 0))
-                                                                .monospace());
-                                                            
-                                                            // Check if next item is the value (not another flag and not a REMOVE entry)
-                                                            if i + 1 < self.pending_launch_args.len() && 
-                                                               !self.pending_launch_args[i + 1].starts_with("--") && 
-                                                               !self.pending_launch_args[i + 1].starts_with("REMOVE:") {
-                                                                ui.add_space(8.0);
-                                                                ui.label(egui::RichText::new(&self.pending_launch_args[i + 1])
-                                                                    .size(11.0)
-                                                                    .color(egui::Color32::from_rgb(255, 200, 100))
-                                                                    .monospace());
-                                                                
-                                                                // Remove button
-                                                                ui.add_space(8.0);
-                                                                if ui.small_button("❌").on_hover_text("Remove this pending parameter").clicked() {
-                                                                    remove_pending_indices.push(i);
-                                                                    remove_pending_indices.push(i + 1); // Remove value too
-                                                                    // Also remove from settings
-                                                                    if let Some(pos) = self.desktop_settings.custom_launch_args.iter().position(|x| x == arg) {
-                                                                        self.desktop_settings.custom_launch_args.remove(pos);
-                                                                        if pos < self.desktop_settings.custom_launch_args.len() {
-                                                                            self.desktop_settings.custom_launch_args.remove(pos);
-                                                                        }
-                                                                        if let Err(e) = DesktopSettingsManager::save_desktop_settings(&self.desktop_settings) {
-                                                                            eprintln!("Failed to save desktop settings: {}", e);
-                                                                        }
-                                                                    }
-                                                                }
-                                                            } else {
-                                                                // Remove button for flag
-                                                                ui.add_space(8.0);
-                                                                if ui.small_button("❌").on_hover_text("Remove this pending parameter").clicked() {
-                                                                    remove_pending_indices.push(i);
-                                                                    // Also remove from settings
-                                                                    if let Some(pos) = self.desktop_settings.custom_launch_args.iter().position(|x| x == arg) {
-                                                                        self.desktop_settings.custom_launch_args.remove(pos);
-                                                                        if let Err(e) = DesktopSettingsManager::save_desktop_settings(&self.desktop_settings) {
-                                                                            eprintln!("Failed to save desktop settings: {}", e);
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                        } else {
-                                                            // Standalone argument
-                                                            ui.label(egui::RichText::new(arg)
-                                                                .size(11.0)
-                                                                .color(egui::Color32::from_rgb(255, 165, 0))
-                                                                .monospace());
-                                                        }
-                                                    });
-                                                    i += 1;
-                                                }
-                                                
-                                                // Remove pending parameters if any were clicked
-                                                if !remove_pending_indices.is_empty() {
-                                                    // Sort in reverse order to remove from end first
-                                                    remove_pending_indices.sort_by(|a, b| b.cmp(a));
-                                                    for idx in remove_pending_indices {
-                                                        if idx < self.pending_launch_args.len() {
-                                                            self.pending_launch_args.remove(idx);
-                                                        }
-                                                    }
-                                                }
-                                            });
-                                        });
-                                    ui.add_space(8.0);
-                                }
-                                
-                                // Terminal output - scale with GUI size
-                                let available_rect = ui.available_rect_before_wrap();
-                                let terminal_height = (available_rect.height() * 0.6).max(200.0).min(500.0);
-                                
-                                egui::Frame::none()
-                                    .fill(egui::Color32::BLACK)
-                                    .rounding(4.0)
-                                    .inner_margin(12.0)
-                                    .show(ui, |ui| {
+                                        ui.set_min_height(terminal_height);
+                                        // Add both vertical and horizontal scroll areas
                                         egui::ScrollArea::both()
                                             .max_height(terminal_height)
                                             .auto_shrink([false; 2])
                                             .stick_to_bottom(true)
                                             .show(ui, |ui| {
-                                                // Don't constrain width for horizontal scrolling
-                                                
-                                                for log_line in &self.node_logs {
-                                                    ui.horizontal(|ui| {
-                                                        // Timestamp
-                                                        ui.label(egui::RichText::new(&log_line.timestamp)
-                                                            .size(11.0)
-                                                            .color(egui::Color32::GRAY)
-                                                            .monospace());
+                                                // Use a vertical layout with left alignment
+                                                ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                                                    // Show recent log lines or sample data if no logs
+                                                    if self.node_logs.is_empty() {
+                                                        // Show sample terminal output like in mockup
+                                                        let sample_logs = vec![
+                                                            "13:31:05 INFO Status connected_peers=4 latest_block=4",
+                                                            "13:31:10 INFO Status connected_peers=4 latest_block=4", 
+                                                            "13:31:15 INFO Status connected_peers=4 latest_block=4",
+                                                            "13:31:20 INFO Very long log line that demonstrates horizontal scrolling capability when terminal output exceeds the visible width of the terminal window area and maintains proper left alignment"
+                                                        ];
                                                         
-                                                        ui.add_space(8.0);
-                                                        
-                                                        // Log content with color based on level
-                                                        let color = match log_line.level {
-                                                            LogLevel::Error => egui::Color32::from_rgb(255, 100, 100),
-                                                            LogLevel::Warn => egui::Color32::from_rgb(255, 200, 100),
-                                                            LogLevel::Info => egui::Color32::WHITE,
-                                                            LogLevel::Debug => egui::Color32::from_rgb(150, 150, 255),
-                                                            LogLevel::Trace => egui::Color32::GRAY,
-                                                        };
-                                                        
-                                                        // Clean the log content to remove ANSI codes and strange characters
-                                                        let cleaned_content = Self::clean_log_content(&log_line.content);
-                                                        
-                                                        ui.label(egui::RichText::new(&cleaned_content)
-                                                            .size(12.0)
-                                                            .color(color)
-                                                            .monospace());
-                                                    });
-                                                }
-                                                
-                                                if self.node_logs.is_empty() {
-                                                    if self.reth_node.is_monitoring_external() {
-                                                        if self.reth_node.get_external_log_path().is_some() {
-                                                            ui.label(egui::RichText::new("Monitoring external Reth process...")
+                                                        for log in sample_logs {
+                                                            // Disable wrapping for each line
+                                                            ui.style_mut().wrap = Some(false);
+                                                            ui.label(egui::RichText::new(log)
                                                                 .size(12.0)
-                                                                .color(egui::Color32::LIGHT_BLUE)
+                                                                .color(egui::Color32::from_rgb(255, 193, 7)) // Orange like in mockup
                                                                 .monospace());
-                                                            ui.label(egui::RichText::new("Tailing log file for real-time output...")
-                                                                .size(11.0)
-                                                                .color(egui::Color32::LIGHT_GREEN)
-                                                                .monospace());
-                                                            ui.label(egui::RichText::new("Logs will appear here as they are generated.")
-                                                                .size(11.0)
-                                                                .color(egui::Color32::GRAY)
-                                                                .monospace());
-                                                        } else {
-                                                            ui.label(egui::RichText::new("Monitoring external Reth process...")
-                                                                .size(12.0)
-                                                                .color(egui::Color32::LIGHT_BLUE)
-                                                                .monospace());
-                                                            ui.label(egui::RichText::new("⚠ No log files found")
-                                                                .size(11.0)
-                                                                .color(egui::Color32::YELLOW)
-                                                                .monospace());
-                                                            ui.label(egui::RichText::new("Reth may not be configured for file logging.")
-                                                                .size(10.0)
-                                                                .color(egui::Color32::GRAY)
-                                                                .monospace());
-                                                            ui.label(egui::RichText::new("To enable: restart Reth with --log.file.directory <path>")
-                                                                .size(10.0)
-                                                                .color(egui::Color32::GRAY)
-                                                                .monospace());
-                                                            ui.add_space(8.0);
-                                                            if ui.button("Disconnect and Start Managed Reth").clicked() {
-                                                                self.disconnect_from_external_reth();
-                                                                self.install_status = InstallStatus::Completed;
-                                                            }
                                                         }
                                                     } else {
-                                                        ui.label(egui::RichText::new("Starting Reth node...")
-                                                            .size(12.0)
-                                                            .color(egui::Color32::GRAY)
-                                                            .monospace());
+                                                        // Show actual log lines - clean and left-aligned
+                                                        let logs_to_show: Vec<_> = self.node_logs.iter().rev().take(40).collect();
+                                                        
+                                                        for log_line in logs_to_show.into_iter().rev() {
+                                                            // Clean the log content to remove ANSI escape codes
+                                                            let cleaned_content = Self::clean_log_content(&log_line.content);
+                                                            
+                                                            // Format: timestamp + cleaned content
+                                                            let formatted_line = format!("{} {}", 
+                                                                log_line.timestamp.split(' ').next().unwrap_or(""),
+                                                                cleaned_content
+                                                            );
+                                                            
+                                                            let color = match log_line.level {
+                                                                LogLevel::Error => egui::Color32::from_rgb(255, 100, 100),
+                                                                LogLevel::Warn => egui::Color32::from_rgb(255, 200, 100),
+                                                                LogLevel::Info => egui::Color32::from_rgb(255, 193, 7), // Orange like mockup
+                                                                LogLevel::Debug => egui::Color32::from_rgb(150, 150, 255),
+                                                                LogLevel::Trace => egui::Color32::GRAY,
+                                                            };
+                                                            
+                                                            // Disable wrapping for each line
+                                                            ui.style_mut().wrap = Some(false);
+                                                            ui.label(egui::RichText::new(&formatted_line)
+                                                                .size(12.0)
+                                                                .color(color)
+                                                                .monospace());
+                                                        }
                                                     }
-                                                }
+                                                });
                                             });
                                     });
-                            });
                         
                         // Auto-refresh for live updates
                         ctx.request_repaint_after(std::time::Duration::from_millis(500));
                     }
+                    InstallStatus::Completed => {
+                        // Reth is installed and ready - no UI needed, use header controls
+                    }
                     InstallStatus::Stopped => {
-                        egui::Frame::none()
-                            .fill(RethTheme::SURFACE)
-                            .rounding(8.0)
-                            .inner_margin(20.0)
-                            .show(ui, |ui| {
-                                ui.set_max_width(max_width);
-                                ui.vertical_centered(|ui| {
-                                    ui.label(RethTheme::muted_text("⭕ Reth Node Stopped"));
-                                    ui.add_space(16.0);
-                                    
-                                    let restart_button = egui::Button::new(
-                                        egui::RichText::new("Start Reth")
-                                            .size(16.0)
-                                            .color(RethTheme::TEXT_PRIMARY)
-                                    )
-                                    .min_size(egui::vec2(160.0, 40.0))
-                                    .fill(RethTheme::PRIMARY);
-                                    
-                                    if ui.add(restart_button).clicked() {
-                                        self.launch_reth();
-                                    }
-                                });
-                            });
+                        // Reth is stopped - no UI needed, use header controls  
                     }
                     InstallStatus::Error(error) => {
                         let error_message = error.clone();
@@ -1968,10 +1803,8 @@ impl eframe::App for MyApp {
                             });
                     }
                 }
-                });
-                
-                ui.add_space(40.0);
             });
+        });
         });
     }
     

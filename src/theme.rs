@@ -14,6 +14,7 @@ impl RethTheme {
     pub const WARNING: egui::Color32 = egui::Color32::from_rgb(255, 159, 0);         // Warning orange
     pub const ERROR: egui::Color32 = egui::Color32::from_rgb(248, 81, 73);           // Error red
     pub const BORDER: egui::Color32 = egui::Color32::from_rgb(48, 54, 61);           // Border color
+    pub const SURFACE_VARIANT: egui::Color32 = egui::Color32::from_rgb(30, 35, 42);  // Darker surface variant
 
     pub fn apply(ctx: &egui::Context) {
         let mut style = (*ctx.style()).clone();
@@ -113,5 +114,18 @@ impl RethTheme {
             .size(14.0)
             .color(Self::ERROR)
             .strong()
+    }
+    
+    pub fn text(text: &str) -> egui::RichText {
+        egui::RichText::new(text)
+            .size(14.0)
+            .color(Self::TEXT_PRIMARY)
+    }
+    
+    pub fn monospace_text(text: &str) -> egui::RichText {
+        egui::RichText::new(text)
+            .size(12.0)
+            .color(Self::TEXT_PRIMARY)
+            .monospace()
     }
 }

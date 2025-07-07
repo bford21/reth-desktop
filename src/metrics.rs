@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
-use serde::{Deserialize, Serialize};
+// Removed unused imports
 
 /// Maximum number of data points to keep for each metric
 const MAX_DATA_POINTS: usize = 60; // 60 points = 1 minute of data at 1 second intervals
@@ -17,16 +17,14 @@ pub struct MetricHistory {
     pub name: String,
     pub values: VecDeque<MetricValue>,
     pub unit: String,
-    pub description: String,
 }
 
 impl MetricHistory {
-    pub fn new(name: String, unit: String, description: String) -> Self {
+    pub fn new(name: String, unit: String) -> Self {
         Self {
             name,
             values: VecDeque::with_capacity(MAX_DATA_POINTS),
             unit,
-            description,
         }
     }
     
@@ -83,42 +81,34 @@ impl RethMetrics {
             sync_progress: MetricHistory::new(
                 "Sync Progress".to_string(),
                 "%".to_string(),
-                "Blockchain synchronization progress".to_string(),
             ),
             peers_connected: MetricHistory::new(
                 "Connected Peers".to_string(),
                 "peers".to_string(),
-                "Number of connected network peers".to_string(),
             ),
             gas_price: MetricHistory::new(
                 "Gas Price".to_string(),
                 "gwei".to_string(),
-                "Current network gas price".to_string(),
             ),
             block_height: MetricHistory::new(
                 "Block Height".to_string(),
                 "blocks".to_string(),
-                "Current blockchain height".to_string(),
             ),
             transactions_per_second: MetricHistory::new(
-                "Transactions/sec".to_string(),
-                "tx/s".to_string(),
-                "Transactions processed per second".to_string(),
+                "TX Pool Size".to_string(),
+                "txs".to_string(),
             ),
             memory_usage: MetricHistory::new(
                 "Memory Usage".to_string(),
                 "MB".to_string(),
-                "Memory consumption of the node".to_string(),
             ),
             cpu_usage: MetricHistory::new(
                 "CPU Usage".to_string(),
                 "%".to_string(),
-                "CPU utilization of the node".to_string(),
             ),
             disk_io: MetricHistory::new(
-                "Disk I/O".to_string(),
-                "MB/s".to_string(),
-                "Disk read/write throughput".to_string(),
+                "Active Downloads".to_string(),
+                "blocks".to_string(),
             ),
             last_poll_time: None,
         }
@@ -139,49 +129,85 @@ impl RethMetrics {
     pub fn update_from_prometheus_text(&mut self, text: &str) {
         let metrics = parse_prometheus_metrics(text);
         
-        // Update sync progress
-        if let Some(value) = metrics.get("reth_sync_progress") {
-            if let Ok(v) = value.parse::<f64>() {
-                self.sync_progress.add_value(v * 100.0); // Convert to percentage
-            }
-        }
-        
-        // Update connected peers
-        if let Some(value) = metrics.get("reth_p2p_connected_peers") {
+        // Update connected peers (this metric exists in the endpoint)
+        if let Some(value) = metrics.get("reth_network_connected_peers") {
             if let Ok(v) = value.parse::<f64>() {
                 self.peers_connected.add_value(v);
             }
         }
         
-        // Update block height
-        if let Some(value) = metrics.get("reth_sync_height") {
+        // Update block height using canonical chain height
+        if let Some(value) = metrics.get("reth_blockchain_tree_canonical_chain_height") {
             if let Ok(v) = value.parse::<f64>() {
                 self.block_height.add_value(v);
             }
         }
         
-        // Update memory usage (convert from bytes to MB)
-        if let Some(value) = metrics.get("process_resident_memory_bytes") {
+        // Update memory usage (convert from bytes to MB) - this metric exists
+        if let Some(value) = metrics.get("reth_process_resident_memory_bytes") {
             if let Ok(v) = value.parse::<f64>() {
                 self.memory_usage.add_value(v / 1_048_576.0); // Convert to MB
             }
         }
         
-        // Update CPU usage
-        if let Some(value) = metrics.get("process_cpu_seconds_total") {
+        // Calculate sync progress based on multiple indicators
+        let mut is_syncing = false;
+        
+        // Check gas per second (active sync indicator)
+        if let Some(value) = metrics.get("reth_sync_execution_gas_per_second") {
             if let Ok(v) = value.parse::<f64>() {
+                if v > 0.0 {
+                    is_syncing = true;
+                }
+            }
+        }
+        
+        // Check active block downloads
+        if let Some(value) = metrics.get("reth_consensus_engine_beacon_active_block_downloads") {
+            if let Ok(v) = value.parse::<f64>() {
+                if v > 0.0 {
+                    is_syncing = true;
+                }
+            }
+        }
+        
+        // If we have block height, we can show it instead of a percentage
+        // For now, show syncing status rather than a misleading percentage
+        if is_syncing {
+            // Don't show 100% when syncing, show a value that indicates ongoing sync
+            self.sync_progress.add_value(0.0); // Will show as "Syncing"
+        } else if self.block_height.get_latest().unwrap_or(0.0) > 0.0 {
+            // Only show 100% if we have a block height and no sync activity
+            self.sync_progress.add_value(100.0);
+        }
+        
+        // Update CPU usage (using the correct metric name)
+        if let Some(value) = metrics.get("reth_process_cpu_seconds_total") {
+            if let Ok(_v) = value.parse::<f64>() {
                 // This is cumulative, so we'd need to calculate the rate
                 // For now, we'll use a placeholder
                 // TODO: Calculate actual CPU usage rate
             }
         }
         
-        // Update transactions per second
-        if let Some(value) = metrics.get("reth_transaction_pool_transactions_total") {
+        // For transactions per second, we can use a different approach
+        // Look at the transaction pool size as an indicator
+        if let Some(value) = metrics.get("reth_transaction_pool_transactions") {
             if let Ok(v) = value.parse::<f64>() {
-                // This is cumulative, so we'd need to calculate the rate
-                // For now, we'll use a placeholder
-                // TODO: Calculate actual TPS
+                // This shows current pool size, not TPS, but it's useful
+                self.transactions_per_second.add_value(v);
+            }
+        }
+        
+        // Update gas price if available (useful for node operators)
+        // Note: Gas price might come from a different metric or RPC call
+        // For now, we'll use a placeholder since it's not in the metrics endpoint
+        
+        // Track active downloads (useful during sync)
+        if let Some(value) = metrics.get("reth_consensus_engine_beacon_active_block_downloads") {
+            if let Ok(v) = value.parse::<f64>() {
+                // Could be used to show sync activity
+                self.disk_io.add_value(v); // Repurpose disk_io for active downloads
             }
         }
     }

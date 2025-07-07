@@ -2,7 +2,7 @@
 
 A fast + lightweight desktop GUI application for managing [Reth](https://github.com/paradigmxyz/reth) Ethereum node installations and operations.
 
-![Reth Desktop UI](assets/reth-desktop-ui.png)
+![Reth Desktop UI](assets/interface.png)
 
 ## Value Proposition
 

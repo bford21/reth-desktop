@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::fs::File;
 use tokio::sync::mpsc;
 use serde::{Deserialize, Serialize};
+use crate::settings::DesktopSettings;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliOption {
@@ -59,7 +60,7 @@ impl LogLine {
         // We'll find the first occurrence and remove everything up to the first space after it
         
         // Find a pattern that looks like: 4 digits, dash, 2 digits, dash, 2 digits, T, etc.
-        let mut chars: Vec<char> = content.chars().collect();
+        let chars: Vec<char> = content.chars().collect();
         let len = chars.len();
         
         // Look for timestamp pattern starting position
@@ -136,7 +137,7 @@ impl RethNode {
         }
     }
 
-    pub fn start(&mut self, reth_path: &str, custom_args: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub fn start(&mut self, reth_path: &str, custom_args: &[String], settings: &DesktopSettings) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if self.is_running {
             return Err("Reth node is already running".into());
         }
@@ -159,54 +160,74 @@ impl RethNode {
         let mut command = Command::new(reth_path);
         let mut command_parts = vec![
             reth_path.to_string(), 
-            "node".to_string(), 
-            "--full".to_string(),
-            "--metrics".to_string(),
-            "127.0.0.1:9001".to_string(), 
-            "--log.stdout.format".to_string(), 
-            "terminal".to_string()
+            "node".to_string(),
         ];
         
-        command
-            .arg("node")
-            .arg("--full")
-            .arg("--metrics")
-            .arg("127.0.0.1:9001")
-            .arg("--log.stdout.format")
-            .arg("terminal");
+        command.arg("node");
         
-        // Add file logging configuration if we have a log directory
-        if let Some(log_path) = &log_dir {
-            println!("Configuring Reth to log to: {}", log_path.display());
-            command
-                .arg("--log.file.directory")
-                .arg(log_path) // Directory path
-                .arg("--log.file.format")
-                .arg("terminal") // Use terminal format for readability
-                .arg("--log.file.filter")
-                .arg("info") // Log info level and above to file
-                .arg("--log.file.max-size")
-                .arg("50") // 50 MB max size per log file
-                .arg("--log.file.max-files")
-                .arg("3"); // Keep up to 3 log files
-            
-            // Add to command parts for display
-            command_parts.extend(vec![
-                "--log.file.directory".to_string(),
-                log_path.display().to_string(),
-                "--log.file.format".to_string(),
-                "terminal".to_string(),
-                "--log.file.filter".to_string(),
-                "info".to_string(),
-                "--log.file.max-size".to_string(),
-                "50".to_string(),
-                "--log.file.max-files".to_string(),
-                "3".to_string(),
-            ]);
+        // Add configurable core parameters
+        if settings.reth_defaults.enable_full_node {
+            command.arg("--full");
+            command_parts.push("--full".to_string());
+        }
+        
+        if settings.reth_defaults.enable_metrics {
+            command.arg("--metrics").arg(&settings.reth_defaults.metrics_address);
+            command_parts.push("--metrics".to_string());
+            command_parts.push(settings.reth_defaults.metrics_address.clone());
+        }
+        
+        // Add chain parameter
+        command.arg("--chain").arg(&settings.reth_defaults.chain);
+        command_parts.push("--chain".to_string());
+        command_parts.push(settings.reth_defaults.chain.clone());
+        
+        // Add datadir parameter
+        command.arg("--datadir").arg(&settings.reth_defaults.datadir);
+        command_parts.push("--datadir".to_string());
+        command_parts.push(settings.reth_defaults.datadir.clone());
+        
+        // Add stdout logging configuration
+        if settings.reth_defaults.enable_stdout_logging {
+            command.arg("--log.stdout.format").arg(&settings.reth_defaults.stdout_log_format);
+            command_parts.push("--log.stdout.format".to_string());
+            command_parts.push(settings.reth_defaults.stdout_log_format.clone());
+        }
+        
+        // Add file logging configuration if enabled and we have a log directory
+        if settings.reth_defaults.enable_file_logging {
+            if let Some(log_path) = &log_dir {
+                println!("Configuring Reth to log to: {}", log_path.display());
+                command
+                    .arg("--log.file.directory")
+                    .arg(log_path)
+                    .arg("--log.file.format")
+                    .arg(&settings.reth_defaults.file_log_format)
+                    .arg("--log.file.filter")
+                    .arg(&settings.reth_defaults.file_log_level)
+                    .arg("--log.file.max-size")
+                    .arg(&settings.reth_defaults.file_log_max_size)
+                    .arg("--log.file.max-files")
+                    .arg(&settings.reth_defaults.file_log_max_files);
                 
-            // Store the log directory path - we'll find the actual log file later
-            // Reth creates files with date patterns like reth-2024-01-15-20.log
-            self.external_log_path = Some(log_path.clone());
+                // Add to command parts for display
+                command_parts.extend(vec![
+                    "--log.file.directory".to_string(),
+                    log_path.display().to_string(),
+                    "--log.file.format".to_string(),
+                    settings.reth_defaults.file_log_format.clone(),
+                    "--log.file.filter".to_string(),
+                    settings.reth_defaults.file_log_level.clone(),
+                    "--log.file.max-size".to_string(),
+                    settings.reth_defaults.file_log_max_size.clone(),
+                    "--log.file.max-files".to_string(),
+                    settings.reth_defaults.file_log_max_files.clone(),
+                ]);
+                
+                // Store the log directory path - we'll find the actual log file later
+                // Reth creates files with date patterns like reth-2024-01-15-20.log
+                self.external_log_path = Some(log_path.clone());
+            }
         }
         
         // Add custom arguments from settings
@@ -381,16 +402,20 @@ impl RethNode {
     /// Check if any Reth process is currently running on the system
     /// Uses port checking as a more reliable method than process name matching
     pub fn detect_existing_reth_process() -> bool {
-        // Check if Reth's default RPC port (8545) is listening
-        // This is more reliable than process name matching
-        let rpc_port = Self::is_port_listening(8545);
-        let ws_port = Self::is_port_listening(8546);
-        let engine_port = Self::is_port_listening(8551);
+        // Use default ports for backward compatibility when settings aren't available
+        Self::detect_existing_reth_process_with_ports(8545, 8546, 8551)
+    }
+    
+    /// Check if any Reth process is currently running using configurable ports
+    pub fn detect_existing_reth_process_with_ports(rpc_port: u16, ws_port: u16, engine_port: u16) -> bool {
+        let rpc_listening = Self::is_port_listening(rpc_port);
+        let ws_listening = Self::is_port_listening(ws_port);
+        let engine_listening = Self::is_port_listening(engine_port);
         
-        let is_running = rpc_port || ws_port || engine_port;
+        let is_running = rpc_listening || ws_listening || engine_listening;
         
         if is_running {
-            println!("Detected Reth running - RPC:{} WS:{} Engine:{}", rpc_port, ws_port, engine_port);
+            println!("Detected Reth running - RPC:{} WS:{} Engine:{}", rpc_listening, ws_listening, engine_listening);
         }
         
         is_running
@@ -1047,7 +1072,7 @@ impl RethNode {
                             // Get description from the next line and look for possible values
                             let mut description = String::new();
                             let mut possible_values = None;
-                            let mut accepts_multiple = false;
+                            let accepts_multiple;
                             
                             // Check next few lines for description and possible values
                             let mut j = i + 1;
