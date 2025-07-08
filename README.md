@@ -19,6 +19,8 @@ A fast + lightweight desktop GUI application for managing [Reth](https://github.
 - **External Process Support**: Connects to Reth instances started outside the GUI
 - **Settings Management**: Visual editors for node configuration and desktop preferences
 - **System Requirements**: Automatic validation of system capabilities
+- **Performance Metrics**: Real-time monitoring of node metrics with historical graphs
+- **Start Configuration**: Customizable node startup parameters through UI
 
 ## Architecture
 

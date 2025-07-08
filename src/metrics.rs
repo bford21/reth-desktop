@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 // Removed unused imports
 
 /// Maximum number of data points to keep for each metric
-const MAX_DATA_POINTS: usize = 60; // 60 points = 1 minute of data at 1 second intervals
+const MAX_DATA_POINTS: usize = 600; // 600 points = 10 minutes of data at 1 second intervals
 
 #[derive(Debug, Clone)]
 pub struct MetricValue {
@@ -72,6 +72,9 @@ pub struct RethMetrics {
     pub cpu_usage: MetricHistory,
     pub disk_io: MetricHistory,
     
+    // Custom metrics dynamically added by user
+    pub custom_metrics: HashMap<String, MetricHistory>,
+    
     last_poll_time: Option<Instant>,
 }
 
@@ -110,7 +113,43 @@ impl RethMetrics {
                 "Active Downloads".to_string(),
                 "blocks".to_string(),
             ),
+            custom_metrics: HashMap::new(),
             last_poll_time: None,
+        }
+    }
+    
+    pub fn add_custom_metric(&mut self, metric_name: String) {
+        if !self.custom_metrics.contains_key(&metric_name) {
+            // Try to infer unit from metric name
+            let unit = if metric_name.contains("_bytes") {
+                "MB"  // Display as MB in the UI
+            } else if metric_name.contains("_seconds") {
+                "s"
+            } else if metric_name.contains("_percent") {
+                "%"
+            } else if metric_name.contains("_count") || metric_name.contains("_total") {
+                "count"
+            } else {
+                ""
+            };
+            
+            // Create a display name for the metric
+            let display_name = metric_name.replace('_', " ")
+                .split_whitespace()
+                .map(|word| {
+                    let mut chars = word.chars();
+                    match chars.next() {
+                        None => String::new(),
+                        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            
+            self.custom_metrics.insert(
+                metric_name.clone(),
+                MetricHistory::new(display_name, unit.to_string())
+            );
         }
     }
     
@@ -210,6 +249,29 @@ impl RethMetrics {
                 self.disk_io.add_value(v); // Repurpose disk_io for active downloads
             }
         }
+        
+        // Update custom metrics
+        for (metric_name, metric_history) in &mut self.custom_metrics {
+            if let Some(value) = metrics.get(metric_name) {
+                if let Ok(v) = value.parse::<f64>() {
+                    // Convert bytes to MB if it's a bytes metric
+                    let final_value = if metric_history.unit == "MB" && metric_name.contains("_bytes") {
+                        v / 1_048_576.0 // Convert to MB
+                    } else {
+                        v
+                    };
+                    metric_history.add_value(final_value);
+                }
+            }
+        }
+    }
+    
+    /// Get all available metric names from the prometheus text
+    pub fn get_available_metrics(text: &str) -> Vec<String> {
+        let metrics = parse_prometheus_metrics(text);
+        let mut metric_names: Vec<String> = metrics.keys().cloned().collect();
+        metric_names.sort();
+        metric_names
     }
 }
 

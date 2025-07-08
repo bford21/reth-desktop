@@ -24,11 +24,24 @@ use metrics::RethMetrics;
 
 
 fn main() -> Result<(), eframe::Error> {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1200.0, 800.0])
+        .with_min_inner_size([800.0, 600.0])
+        .with_title("Reth Desktop");
+    
+    // Try to load app icon using reth-docs.png
+    match load_icon() {
+        Ok(icon_data) => {
+            viewport = viewport.with_icon(icon_data);
+        }
+        Err(e) => {
+            eprintln!("Warning: Failed to load app icon: {}", e);
+            // Continue without icon
+        }
+    }
+    
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1200.0, 800.0])
-            .with_min_inner_size([800.0, 600.0])
-            .with_title("Reth Desktop"),
+        viewport,
         ..Default::default()
     };
     
@@ -37,6 +50,21 @@ fn main() -> Result<(), eframe::Error> {
         options,
         Box::new(|cc| Box::new(MyApp::new(cc))),
     )
+}
+
+fn load_icon() -> Result<egui::IconData, Box<dyn std::error::Error>> {
+    let icon_data = include_bytes!("../assets/reth-docs.png");
+    
+    // Try to decode the image
+    let icon_image = image::load_from_memory(icon_data)?;
+    let icon_rgba = icon_image.to_rgba8();
+    let (icon_width, icon_height) = icon_rgba.dimensions();
+    
+    Ok(egui::IconData {
+        rgba: icon_rgba.to_vec(),
+        width: icon_width,
+        height: icon_height,
+    })
 }
 
 struct MyApp {
@@ -79,6 +107,9 @@ struct MyApp {
     metrics_poll_sender: Option<mpsc::UnboundedSender<()>>,
     metrics_receiver: mpsc::UnboundedReceiver<String>,
     metrics_sender: mpsc::UnboundedSender<String>,
+    expanded_metric: Option<String>, // Track which metric is expanded in popup
+    available_metrics: Vec<String>, // All available metrics from Prometheus
+    show_metric_selector: bool, // Show metric selection dialog
 }
 
 enum InstallCommand {
@@ -175,6 +206,12 @@ impl MyApp {
             }
         }
         
+        // Initialize metrics with custom metrics from settings
+        let mut metrics = RethMetrics::new();
+        for metric_name in &desktop_settings.custom_metrics {
+            metrics.add_custom_metric(metric_name.clone());
+        }
+        
         let app = Self {
             installer: Arc::new(Mutex::new(RethInstaller::new())),
             install_status: initial_status,
@@ -210,11 +247,14 @@ impl MyApp {
             pending_launch_args: Vec::new(),
             show_restart_prompt: false,
             command_section_collapsed: true,
-            metrics: RethMetrics::new(),
+            metrics,
             metrics_section_collapsed: false,
             metrics_poll_sender: None,
             metrics_receiver: metrics_rx,
-            metrics_sender: metrics_tx
+            metrics_sender: metrics_tx,
+            expanded_metric: None,
+            available_metrics: Vec::new(),
+            show_metric_selector: false
         };
         
         app
@@ -600,122 +640,313 @@ impl MyApp {
     // Removed show_settings_content function - functionality moved to NodeSettingsWindow
     
     fn show_metrics_section(&mut self, ui: &mut egui::Ui) {
-        // Show metrics in a clean 3x2 grid without collapsible header like in mockup
+        // Show metrics in a clean 3-column grid
         ui.add_space(20.0);
+        
+        // Initialize custom metrics if needed
+        for metric_name in &self.desktop_settings.custom_metrics.clone() {
+            self.metrics.add_custom_metric(metric_name.clone());
+        }
+        
+        let mut expanded_metric_name: Option<String> = None;
+        let mut metric_to_remove: Option<String> = None;
         
         // Metrics grid matching mockup design
         egui::Grid::new("metrics_grid_mockup")
             .num_columns(3)
             .spacing([20.0, 20.0])
             .show(ui, |ui| {
-                // Top row - Most important metrics for sync monitoring
-                self.show_mockup_metric_card(ui, &self.metrics.peers_connected);
-                self.show_mockup_metric_card(ui, &self.metrics.block_height);
-                self.show_mockup_metric_card(ui, &self.metrics.sync_progress);
-                ui.end_row();
+                let mut count = 0;
                 
-                // Bottom row - Resource usage and activity
-                self.show_mockup_metric_card(ui, &self.metrics.memory_usage);
-                self.show_mockup_metric_card(ui, &self.metrics.disk_io); // Active downloads
-                self.show_mockup_metric_card(ui, &self.metrics.transactions_per_second); // TX pool size
-                ui.end_row();
+                // Show default metrics
+                let default_metrics = vec![
+                    ("Connected Peers", self.metrics.peers_connected.clone()),
+                    ("Block Height", self.metrics.block_height.clone()),
+                    ("Sync Progress", self.metrics.sync_progress.clone()),
+                    ("Memory Usage", self.metrics.memory_usage.clone()),
+                    ("Active Downloads", self.metrics.disk_io.clone()),
+                ];
+                
+                for (name, metric) in default_metrics {
+                    if self.show_mockup_metric_card(ui, &metric) {
+                        expanded_metric_name = Some(name.to_string());
+                    }
+                    count += 1;
+                    if count % 3 == 0 {
+                        ui.end_row();
+                    }
+                }
+                
+                // Show custom metrics
+                let custom_metrics: Vec<(String, metrics::MetricHistory)> = self.metrics.custom_metrics
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                    
+                for (metric_name, metric) in custom_metrics {
+                    let (expand_clicked, remove_clicked) = self.show_custom_metric_card(ui, &metric, &metric_name);
+                    if expand_clicked {
+                        expanded_metric_name = Some(metric.name.clone());
+                    }
+                    if remove_clicked {
+                        metric_to_remove = Some(metric_name.clone());
+                    }
+                    count += 1;
+                    if count % 3 == 0 {
+                        ui.end_row();
+                    }
+                }
+                
+                // Always show add metric card
+                self.show_add_metric_card(ui);
+                count += 1;
+                
+                // End row if needed
+                if count % 3 != 0 {
+                    ui.end_row();
+                }
             });
+            
+        // Handle expanded metric
+        if let Some(name) = expanded_metric_name {
+            self.expanded_metric = Some(name);
+        }
+        
+        // Handle metric removal
+        if let Some(metric_name) = metric_to_remove {
+            // Remove from settings
+            self.desktop_settings.custom_metrics.retain(|m| m != &metric_name);
+            // Remove from metrics
+            self.metrics.custom_metrics.remove(&metric_name);
+            // Save settings
+            if let Err(e) = DesktopSettingsManager::save_desktop_settings(&self.desktop_settings) {
+                eprintln!("Failed to save custom metrics: {}", e);
+            }
+        }
     }
     
-    fn show_mockup_metric_card(&self, ui: &mut egui::Ui, metric: &metrics::MetricHistory) {
-        egui::Frame::none()
-            .fill(RethTheme::SURFACE)
-            .rounding(8.0)
-            .inner_margin(16.0)
-            .stroke(egui::Stroke::new(1.0, RethTheme::PRIMARY.gamma_multiply(0.3)))
-            .show(ui, |ui| {
-                ui.set_min_size(egui::Vec2::new(350.0, 160.0));
-                ui.vertical(|ui| {
-                    // Header with title
-                    ui.label(egui::RichText::new(&metric.name.to_uppercase())
-                        .size(11.0)
-                        .color(RethTheme::TEXT_SECONDARY)
-                        .strong());
+    fn show_mockup_metric_card(&self, ui: &mut egui::Ui, metric: &metrics::MetricHistory) -> bool {
+        let mut expand_clicked = false;
+        
+        ui.vertical(|ui| {
+            // Title outside the box with expand button
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(&metric.name)
+                    .size(14.0)
+                    .color(RethTheme::TEXT_PRIMARY)
+                    .strong());
+                
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Use simple text for better rendering
+                    let button = egui::Button::new("View")
+                        .min_size(egui::Vec2::new(0.0, 0.0)) // Reset minimum size
+                        .fill(egui::Color32::TRANSPARENT)
+                        .stroke(egui::Stroke::new(1.0, RethTheme::TEXT_SECONDARY));
                     
-                    ui.add_space(8.0);
+                    // Apply custom padding for equal spacing
+                    ui.style_mut().spacing.button_padding = egui::Vec2::new(6.0, 4.0);
                     
-                    // Main content area with value and graph
-                    ui.horizontal(|ui| {
-                        // Left side: Current value
-                        ui.vertical(|ui| {
-                            let current_value = metric.get_latest().unwrap_or(0.0);
-                            let (value_text, value_color) = if metric.unit == "%" {
-                                // Special handling for sync progress
-                                if metric.name == "Sync Progress" && current_value == 0.0 {
-                                    ("Syncing...".to_string(), RethTheme::WARNING)
-                                } else {
-                                    (format!("{:.1}%", current_value), RethTheme::TEXT_PRIMARY)
-                                }
-                            } else if metric.unit == "MB" {
-                                (format!("{:.1} MB", current_value), RethTheme::TEXT_PRIMARY)
-                            } else if metric.unit == "gwei" {
-                                (format!("{:.2} gwei", current_value), RethTheme::TEXT_PRIMARY)
-                            } else if metric.unit == "peers" {
-                                (format!("{:.0}", current_value), RethTheme::TEXT_PRIMARY)
-                            } else if metric.unit == "blocks" {
-                                // Format block numbers
-                                let formatted = if current_value >= 1_000_000.0 {
-                                    format!("{:.2}M", current_value / 1_000_000.0)
-                                } else if current_value >= 1000.0 {
-                                    format!("{:.1}k", current_value / 1000.0)
-                                } else {
-                                    format!("{:.0}", current_value)
-                                };
-                                (formatted, RethTheme::TEXT_PRIMARY)
-                            } else if metric.unit == "txs" {
-                                (format!("{:.0} txs", current_value), RethTheme::TEXT_PRIMARY)
-                            } else {
-                                (format!("{:.0} {}", current_value, metric.unit), RethTheme::TEXT_PRIMARY)
-                            };
-                            
-                            ui.label(egui::RichText::new(&value_text)
-                                .size(24.0)
-                                .color(value_color)
-                                .strong());
-                            
-                            // Show trend if we have enough data
-                            if metric.values.len() >= 2 {
-                                let prev_value = metric.values.get(metric.values.len() - 2).map(|v| v.value).unwrap_or(0.0);
-                                let trend = current_value - prev_value;
-                                if trend > 0.0 {
-                                    ui.label(egui::RichText::new("↑").size(14.0).color(RethTheme::SUCCESS));
-                                } else if trend < 0.0 {
-                                    ui.label(egui::RichText::new("↓").size(14.0).color(RethTheme::ERROR));
-                                } else {
-                                    ui.label(egui::RichText::new("→").size(14.0).color(RethTheme::TEXT_SECONDARY));
-                                }
-                            }
-                        });
-                        
-                        ui.add_space(16.0);
-                        
-                        // Right side: Graph
-                        self.draw_metric_graph(ui, metric);
-                    });
+                    if ui.add(button).on_hover_text("View full history").clicked() {
+                        expand_clicked = true;
+                    }
                 });
             });
+            
+            ui.add_space(4.0);
+            
+            // Frame containing only the graph
+            egui::Frame::none()
+                .fill(RethTheme::SURFACE)
+                .rounding(8.0)
+                .inner_margin(egui::Margin::same(8.0)) // Equal padding all around
+                .stroke(egui::Stroke::new(1.0, RethTheme::PRIMARY.gamma_multiply(0.3)))
+                .show(ui, |ui| {
+                    ui.set_min_size(egui::Vec2::new(350.0, 180.0));
+                    
+                    // Check if we have data
+                    if metric.values.is_empty() {
+                        // Show "No data" message
+                        ui.centered_and_justified(|ui| {
+                            ui.label(egui::RichText::new("No data")
+                                .size(16.0)
+                                .color(RethTheme::TEXT_SECONDARY));
+                        });
+                    } else {
+                        // Draw graph that fills the frame (limited to 5 minutes)
+                        self.draw_metric_graph_limited(ui, metric, 300); // 300 seconds = 5 minutes
+                    }
+                });
+        });
+        
+        expand_clicked
     }
     
-    fn draw_metric_graph(&self, ui: &mut egui::Ui, metric: &metrics::MetricHistory) {
-        // Use egui_plot for better graph rendering with axis labels
-        let plot_points: PlotPoints = if metric.values.is_empty() {
-            PlotPoints::new(vec![[0.0, 0.0]])
-        } else {
-            // Convert metric values to plot points with time on x-axis
-            let points: Vec<[f64; 2]> = metric.values
-                .iter()
-                .enumerate()
-                .map(|(i, value)| {
-                    [i as f64, value.value]
-                })
-                .collect();
-            PlotPoints::new(points)
-        };
+    fn show_custom_metric_card(&self, ui: &mut egui::Ui, metric: &metrics::MetricHistory, _metric_key: &str) -> (bool, bool) {
+        let mut expand_clicked = false;
+        let mut remove_clicked = false;
+        
+        ui.vertical(|ui| {
+            // Title outside the box with expand and remove buttons
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(&metric.name)
+                    .size(14.0)
+                    .color(RethTheme::TEXT_PRIMARY)
+                    .strong());
+                
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Apply custom padding for equal spacing
+                    ui.style_mut().spacing.button_padding = egui::Vec2::new(6.0, 4.0);
+                    
+                    // Remove button
+                    let remove_button = egui::Button::new("×")
+                        .min_size(egui::Vec2::new(0.0, 0.0))
+                        .fill(egui::Color32::TRANSPARENT)
+                        .stroke(egui::Stroke::new(1.0, RethTheme::ERROR));
+                    
+                    if ui.add(remove_button).on_hover_text("Remove metric").clicked() {
+                        remove_clicked = true;
+                    }
+                    
+                    ui.add_space(4.0);
+                    
+                    // View button
+                    let view_button = egui::Button::new("View")
+                        .min_size(egui::Vec2::new(0.0, 0.0))
+                        .fill(egui::Color32::TRANSPARENT)
+                        .stroke(egui::Stroke::new(1.0, RethTheme::TEXT_SECONDARY));
+                    
+                    if ui.add(view_button).on_hover_text("View full history").clicked() {
+                        expand_clicked = true;
+                    }
+                });
+            });
+            
+            ui.add_space(4.0);
+            
+            // Frame containing only the graph
+            egui::Frame::none()
+                .fill(RethTheme::SURFACE)
+                .rounding(8.0)
+                .inner_margin(egui::Margin::same(8.0))
+                .stroke(egui::Stroke::new(1.0, RethTheme::PRIMARY.gamma_multiply(0.3)))
+                .show(ui, |ui| {
+                    ui.set_min_size(egui::Vec2::new(350.0, 180.0));
+                    
+                    // Check if we have data
+                    if metric.values.is_empty() {
+                        // Show "No data" message
+                        ui.centered_and_justified(|ui| {
+                            ui.label(egui::RichText::new("No data")
+                                .size(16.0)
+                                .color(RethTheme::TEXT_SECONDARY));
+                        });
+                    } else {
+                        // Draw graph that fills the frame (limited to 5 minutes)
+                        self.draw_metric_graph_limited(ui, metric, 300);
+                    }
+                });
+        });
+        
+        (expand_clicked, remove_clicked)
+    }
+    
+    fn show_add_metric_card(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            // Empty label to match the height of other metric titles
+            ui.label(egui::RichText::new(" ")
+                .size(14.0));
+            
+            ui.add_space(4.0);
+            
+            // Create interactive area for the entire card
+            let (rect, response) = ui.allocate_exact_size(
+                egui::Vec2::new(350.0, 196.0), // Match the height of other cards (180 + margins)
+                egui::Sense::click()
+            );
+            
+            let is_hovered = response.hovered();
+            
+            // Draw the frame
+            let painter = ui.painter();
+            painter.rect(
+                rect,
+                8.0,
+                if is_hovered { 
+                    RethTheme::SURFACE.gamma_multiply(1.2) 
+                } else { 
+                    RethTheme::SURFACE 
+                },
+                egui::Stroke::new(
+                    1.0, 
+                    if is_hovered { 
+                        RethTheme::PRIMARY 
+                    } else { 
+                        RethTheme::PRIMARY.gamma_multiply(0.3) 
+                    }
+                )
+            );
+            
+            // Draw centered "+" sign
+            let color = if is_hovered {
+                RethTheme::PRIMARY
+            } else {
+                RethTheme::TEXT_SECONDARY
+            };
+            
+            let stroke = egui::Stroke::new(3.0, color);
+            let center = rect.center();
+            let size = 20.0;
+            
+            // Horizontal line
+            painter.line_segment(
+                [
+                    egui::Pos2::new(center.x - size, center.y),
+                    egui::Pos2::new(center.x + size, center.y),
+                ],
+                stroke,
+            );
+            
+            // Vertical line
+            painter.line_segment(
+                [
+                    egui::Pos2::new(center.x, center.y - size),
+                    egui::Pos2::new(center.x, center.y + size),
+                ],
+                stroke,
+            );
+            
+            // Add tooltip and cursor change on hover
+            if is_hovered {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            
+            // Handle click and tooltip
+            let response = response.on_hover_text("Add a new metric");
+            if response.clicked() {
+                self.show_metric_selector = true;
+            }
+        });
+    }
+    
+    fn draw_metric_graph_limited(&self, ui: &mut egui::Ui, metric: &metrics::MetricHistory, max_seconds: usize) {
+        // Don't draw anything if there's no data (handled by caller)
+        if metric.values.is_empty() {
+            return;
+        }
+        
+        // Only show the last N data points (max_seconds)
+        let start_idx = metric.values.len().saturating_sub(max_seconds);
+        
+        // Convert metric values to plot points with time on x-axis
+        let points: Vec<[f64; 2]> = metric.values
+            .iter()
+            .skip(start_idx)
+            .enumerate()
+            .map(|(i, value)| {
+                [i as f64, value.value]
+            })
+            .collect();
+        let plot_points = PlotPoints::new(points);
         
         // Configure the plot
         let line = Line::new(plot_points)
@@ -730,46 +961,192 @@ impl MyApp {
         
         // Create the plot with proper axis labels and formatting
         let plot = Plot::new(format!("metric_plot_{}", metric.name))
-            .height(100.0)
-            .width(200.0)
+            .auto_bounds(egui::Vec2b::new(true, true))
             .show_axes([true, true])
-            .show_grid([true, true])
+            .show_grid([false, false]) // Only show axes, no grid
             .include_y(0.0) // Always show y=0
+            .allow_zoom(false)
+            .allow_drag(false)
+            .allow_boxed_zoom(false)
+            .allow_scroll(false)
+            .show_background(false)
+            .y_axis_width(4) // Give more space for y-axis labels
             .label_formatter(move |_name, value| {
-                // Format the y-axis values based on the metric unit
+                // Format hover values
                 match unit.as_str() {
                     "%" => format!("{:.0}%", value.y),
                     "MB" => format!("{:.0} MB", value.y),
-                    "peers" => format!("{:.0}", value.y),
+                    "peers" => format!("{:.0} peers", value.y),
                     "blocks" => {
                         if value.y >= 1_000_000.0 {
-                            format!("{:.1}M", value.y / 1_000_000.0)
+                            format!("{:.1}M blocks", value.y / 1_000_000.0)
                         } else if value.y >= 1000.0 {
-                            format!("{:.1}k", value.y / 1000.0)
+                            format!("{:.1}k blocks", value.y / 1000.0)
                         } else {
-                            format!("{:.0}", value.y)
+                            format!("{:.0} blocks", value.y)
                         }
                     },
-                    "txs" => format!("{:.0}", value.y),
-                    _ => format!("{:.1}", value.y),
+                    "txs" => format!("{:.0} txs", value.y),
+                    _ => format!("{:.1} {}", value.y, unit),
                 }
             })
-            .x_axis_formatter(|_value, _max_chars, _range| String::new()) // Hide x-axis labels for cleaner look
+            .x_axis_formatter(|value, _max_chars, _range| {
+                // Show time labels - convert from data point index to time
+                let seconds = value as i32;
+                if seconds == 0 {
+                    "0s".to_string()
+                } else if seconds % 60 == 0 {
+                    format!("{}m", seconds / 60)
+                } else if seconds < 60 && seconds % 15 == 0 {
+                    format!("{}s", seconds)
+                } else {
+                    String::new() // Don't show label for non-round times
+                }
+            })
             .y_axis_formatter(move |value, _max_chars, _range| {
-                // Simplified y-axis labels
+                // Format y-axis labels based on unit type with consistent formatting
                 match unit_for_formatter.as_str() {
-                    "%" => format!("{:.0}", value),
-                    "MB" => format!("{:.0}", value),
+                    "%" => format!("{:.0}%", value),
+                    "MB" => {
+                        if value >= 10000.0 {
+                            format!("{:.0}G", value / 1000.0)
+                        } else if value >= 1000.0 {
+                            format!("{:.1}G", value / 1000.0)
+                        } else {
+                            format!("{:.0}", value)
+                        }
+                    },
                     "blocks" => {
-                        if value >= 1_000_000.0 {
-                            format!("{:.1}M", value / 1_000_000.0)
+                        if value >= 1_000_000_000.0 {
+                            format!("{:.0}B", value / 1_000_000_000.0)
+                        } else if value >= 1_000_000.0 {
+                            format!("{:.0}M", value / 1_000_000.0)
                         } else if value >= 1000.0 {
                             format!("{:.0}k", value / 1000.0)
                         } else {
                             format!("{:.0}", value)
                         }
                     },
-                    _ => format!("{:.0}", value),
+                    "peers" => format!("{:.0}", value),
+                    _ => {
+                        if value >= 1000.0 {
+                            format!("{:.0}k", value / 1000.0)
+                        } else {
+                            format!("{:.0}", value)
+                        }
+                    },
+                }
+            });
+        
+        // Show the plot
+        plot.show(ui, |plot_ui| {
+            plot_ui.line(line);
+        });
+    }
+    
+    fn draw_metric_graph(&self, ui: &mut egui::Ui, metric: &metrics::MetricHistory) {
+        // Don't draw anything if there's no data (handled by caller)
+        if metric.values.is_empty() {
+            return;
+        }
+        
+        // Convert metric values to plot points with time on x-axis
+        let points: Vec<[f64; 2]> = metric.values
+            .iter()
+            .enumerate()
+            .map(|(i, value)| {
+                [i as f64, value.value]
+            })
+            .collect();
+        let plot_points = PlotPoints::new(points);
+        
+        // Configure the plot
+        let line = Line::new(plot_points)
+            .color(RethTheme::PRIMARY)
+            .style(egui_plot::LineStyle::Solid)
+            .width(2.0)
+            .fill(0.0); // Fill to y=0
+        
+        // Clone the unit to avoid lifetime issues
+        let unit = metric.unit.clone();
+        let unit_for_formatter = unit.clone();
+        
+        // Create the plot with proper axis labels and formatting
+        let plot = Plot::new(format!("metric_plot_{}", metric.name))
+            .auto_bounds(egui::Vec2b::new(true, true))
+            .show_axes([true, true])
+            .show_grid([false, false]) // Only show axes, no grid
+            .include_y(0.0) // Always show y=0
+            .allow_zoom(false)
+            .allow_drag(false)
+            .allow_boxed_zoom(false)
+            .allow_scroll(false)
+            .show_background(false)
+            .y_axis_width(4) // Give more space for y-axis labels
+            .label_formatter(move |_name, value| {
+                // Format hover values
+                match unit.as_str() {
+                    "%" => format!("{:.0}%", value.y),
+                    "MB" => format!("{:.0} MB", value.y),
+                    "peers" => format!("{:.0} peers", value.y),
+                    "blocks" => {
+                        if value.y >= 1_000_000.0 {
+                            format!("{:.1}M blocks", value.y / 1_000_000.0)
+                        } else if value.y >= 1000.0 {
+                            format!("{:.1}k blocks", value.y / 1000.0)
+                        } else {
+                            format!("{:.0} blocks", value.y)
+                        }
+                    },
+                    "txs" => format!("{:.0} txs", value.y),
+                    _ => format!("{:.1} {}", value.y, unit),
+                }
+            })
+            .x_axis_formatter(|value, _max_chars, _range| {
+                // Show time labels - convert from data point index to time
+                let seconds = value as i32;
+                if seconds == 0 {
+                    "0s".to_string()
+                } else if seconds % 60 == 0 {
+                    format!("{}m", seconds / 60)
+                } else if seconds < 60 {
+                    format!("{}s", seconds)
+                } else {
+                    String::new() // Don't show label for non-round times
+                }
+            })
+            .y_axis_formatter(move |value, _max_chars, _range| {
+                // Format y-axis labels based on unit type with consistent formatting
+                match unit_for_formatter.as_str() {
+                    "%" => format!("{:.0}%", value),
+                    "MB" => {
+                        if value >= 10000.0 {
+                            format!("{:.0}G", value / 1000.0)
+                        } else if value >= 1000.0 {
+                            format!("{:.1}G", value / 1000.0)
+                        } else {
+                            format!("{:.0}", value)
+                        }
+                    },
+                    "blocks" => {
+                        if value >= 1_000_000_000.0 {
+                            format!("{:.0}B", value / 1_000_000_000.0)
+                        } else if value >= 1_000_000.0 {
+                            format!("{:.0}M", value / 1_000_000.0)
+                        } else if value >= 1000.0 {
+                            format!("{:.0}k", value / 1000.0)
+                        } else {
+                            format!("{:.0}", value)
+                        }
+                    },
+                    "peers" => format!("{:.0}", value),
+                    _ => {
+                        if value >= 1000.0 {
+                            format!("{:.0}k", value / 1000.0)
+                        } else {
+                            format!("{:.0}", value)
+                        }
+                    },
                 }
             });
         
@@ -783,60 +1160,57 @@ impl MyApp {
         let bg_color = if is_primary { RethTheme::PRIMARY.gamma_multiply(0.1) } else { RethTheme::BACKGROUND };
         let border_color = if is_primary { RethTheme::PRIMARY.gamma_multiply(0.3) } else { RethTheme::BORDER };
         
-        egui::Frame::none()
-            .fill(bg_color)
-            .rounding(8.0)
-            .inner_margin(16.0)
-            .stroke(egui::Stroke::new(1.5, border_color))
-            .show(ui, |ui| {
-                ui.set_min_size(egui::Vec2::new(280.0, 120.0));
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        // Metric name
-                        ui.label(egui::RichText::new(&metric.name)
-                            .size(13.0)
-                            .color(RethTheme::TEXT_SECONDARY)
-                            .strong());
-                        
-                        ui.add_space(4.0);
-                        
-                        // Current value
-                        let current_value = metric.get_latest().unwrap_or(0.0);
-                        let (value_text, value_color) = if metric.unit == "%" {
-                            let color = if current_value > 95.0 { RethTheme::SUCCESS } 
-                                      else if current_value > 80.0 { RethTheme::WARNING }
-                                      else { RethTheme::TEXT_PRIMARY };
-                            (format!("{:.1}%", current_value), color)
-                        } else if metric.unit == "MB" {
-                            let color = if current_value > 1000.0 { RethTheme::WARNING }
-                                      else if current_value > 2000.0 { RethTheme::ERROR }
-                                      else { RethTheme::TEXT_PRIMARY };
-                            (format!("{:.1} MB", current_value), color)
-                        } else if metric.unit == "gwei" {
-                            (format!("{:.2} gwei", current_value), RethTheme::TEXT_PRIMARY)
-                        } else if metric.unit == "peers" {
-                            let color = if current_value >= 5.0 { RethTheme::SUCCESS }
-                                      else if current_value >= 1.0 { RethTheme::WARNING }
-                                      else { RethTheme::ERROR };
-                            (format!("{:.0}", current_value), color)
-                        } else {
-                            (format!("{:.0} {}", current_value, metric.unit), RethTheme::TEXT_PRIMARY)
-                        };
-                        
-                        ui.label(egui::RichText::new(&value_text)
-                            .size(22.0)
-                            .color(value_color)
-                            .strong());
-                    });
-                    
-                    ui.add_space(16.0);
-                    
-                    // Larger graph on the right
-                    ui.vertical(|ui| {
-                        self.draw_large_graph(ui, metric);
-                    });
-                });
+        ui.vertical(|ui| {
+            // Title with current value outside the box
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(&metric.name)
+                    .size(13.0)
+                    .color(RethTheme::TEXT_PRIMARY)
+                    .strong());
+                
+                ui.add_space(8.0);
+                
+                // Current value
+                let current_value = metric.get_latest().unwrap_or(0.0);
+                let (value_text, value_color) = if metric.unit == "%" {
+                    let color = if current_value > 95.0 { RethTheme::SUCCESS } 
+                              else if current_value > 80.0 { RethTheme::WARNING }
+                              else { RethTheme::TEXT_PRIMARY };
+                    (format!("{:.1}%", current_value), color)
+                } else if metric.unit == "MB" {
+                    let color = if current_value > 1000.0 { RethTheme::WARNING }
+                              else if current_value > 2000.0 { RethTheme::ERROR }
+                              else { RethTheme::TEXT_PRIMARY };
+                    (format!("{:.1} MB", current_value), color)
+                } else if metric.unit == "gwei" {
+                    (format!("{:.2} gwei", current_value), RethTheme::TEXT_PRIMARY)
+                } else if metric.unit == "peers" {
+                    let color = if current_value >= 5.0 { RethTheme::SUCCESS }
+                              else if current_value >= 1.0 { RethTheme::WARNING }
+                              else { RethTheme::ERROR };
+                    (format!("{:.0}", current_value), color)
+                } else {
+                    (format!("{:.0} {}", current_value, metric.unit), RethTheme::TEXT_PRIMARY)
+                };
+                
+                ui.label(egui::RichText::new(&value_text)
+                    .size(18.0)
+                    .color(value_color));
             });
+            
+            ui.add_space(4.0);
+            
+            // Frame containing only the graph
+            egui::Frame::none()
+                .fill(bg_color)
+                .rounding(8.0)
+                .inner_margin(0.0)
+                .stroke(egui::Stroke::new(1.5, border_color))
+                .show(ui, |ui| {
+                    ui.set_min_size(egui::Vec2::new(280.0, 140.0));
+                    self.draw_large_graph(ui, metric);
+                });
+        });
     }
     
     fn draw_large_graph(&self, ui: &mut egui::Ui, metric: &metrics::MetricHistory) {
@@ -871,12 +1245,15 @@ impl MyApp {
         
         // Create a larger plot with full labels
         let plot = Plot::new(format!("large_metric_plot_{}", metric.name))
-            .height(120.0)
-            .width(240.0)
+            .auto_bounds(egui::Vec2b::new(true, true))
             .show_axes([true, true])
-            .show_grid([true, true])
+            .show_grid([false, false]) // Only show axes, no grid
             .include_y(0.0) // Always show y=0
-            .show_background(true)
+            .show_background(false)
+            .allow_zoom(false)
+            .allow_drag(false)
+            .allow_boxed_zoom(false)
+            .allow_scroll(false)
             .label_formatter(move |_name, value| {
                 // Detailed hover information
                 let time_label = if value.x == 0.0 {
@@ -994,6 +1371,9 @@ impl eframe::App for MyApp {
         
         // Process incoming metrics
         while let Ok(metrics_text) = self.metrics_receiver.try_recv() {
+            // Update available metrics list
+            self.available_metrics = metrics::RethMetrics::get_available_metrics(&metrics_text);
+            
             self.metrics.update_from_prometheus_text(&metrics_text);
             self.metrics.mark_polled();
         }
@@ -1406,6 +1786,176 @@ impl eframe::App for MyApp {
             }
         }
         
+        // Metric selector window
+        if self.show_metric_selector {
+            let mut open = true;
+            let mut selected_metric: Option<String> = None;
+            
+            // Fetch available metrics if we haven't already
+            if self.available_metrics.is_empty() {
+                let metrics_endpoint = format!("http://{}/debug/metrics/prometheus", self.desktop_settings.reth_defaults.metrics_address);
+                if let Ok(metrics_text) = std::process::Command::new("curl")
+                    .arg("-s")
+                    .arg(&metrics_endpoint)
+                    .output()
+                {
+                    if metrics_text.status.success() {
+                        if let Ok(text) = String::from_utf8(metrics_text.stdout) {
+                            self.available_metrics = metrics::RethMetrics::get_available_metrics(&text);
+                        }
+                    }
+                }
+            }
+            
+            egui::Window::new("Select Metric to Add")
+                .resizable(true)
+                .default_width(600.0)
+                .default_height(500.0)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.label("Select a metric from the list below:");
+                    ui.separator();
+                    
+                    // Search filter using context data storage
+                    ui.horizontal(|ui| {
+                        ui.label("Search:");
+                        let mut search_text = ui.ctx().data_mut(|d| 
+                            d.get_temp::<String>(egui::Id::new("metric_search_text"))
+                                .unwrap_or_default()
+                        );
+                        if ui.text_edit_singleline(&mut search_text).changed() {
+                            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("metric_search_text"), search_text.clone()));
+                        }
+                    });
+                    
+                    ui.separator();
+                    
+                    let search_text = ui.ctx().data(|d| 
+                        d.get_temp::<String>(egui::Id::new("metric_search_text"))
+                            .unwrap_or_default()
+                    );
+                    
+                    // Scrollable list of metrics
+                    egui::ScrollArea::vertical()
+                        .max_height(400.0)
+                        .show(ui, |ui| {
+                            for metric_name in &self.available_metrics {
+                                // Filter by search text
+                                if !search_text.is_empty() && !metric_name.to_lowercase().contains(&search_text.to_lowercase()) {
+                                    continue;
+                                }
+                                
+                                // Skip metrics we already have
+                                if self.desktop_settings.custom_metrics.contains(metric_name) {
+                                    continue;
+                                }
+                                
+                                // Skip default metrics
+                                if metric_name == "reth_network_connected_peers" ||
+                                   metric_name == "reth_blockchain_tree_canonical_chain_height" ||
+                                   metric_name == "reth_sync_execution_gas_per_second" ||
+                                   metric_name == "reth_process_resident_memory_bytes" ||
+                                   metric_name == "reth_consensus_engine_beacon_active_block_downloads" ||
+                                   metric_name == "reth_transaction_pool_transactions" {
+                                    continue;
+                                }
+                                
+                                if ui.selectable_label(false, metric_name).clicked() {
+                                    selected_metric = Some(metric_name.clone());
+                                }
+                            }
+                        });
+                });
+                
+            if !open {
+                self.show_metric_selector = false;
+                ctx.data_mut(|d| d.remove::<String>(egui::Id::new("metric_search_text")));
+            }
+            
+            // Add the selected metric
+            if let Some(metric_name) = selected_metric {
+                self.desktop_settings.custom_metrics.push(metric_name.clone());
+                self.metrics.add_custom_metric(metric_name);
+                
+                // Save settings
+                if let Err(e) = DesktopSettingsManager::save_desktop_settings(&self.desktop_settings) {
+                    eprintln!("Failed to save custom metrics: {}", e);
+                }
+                
+                self.show_metric_selector = false;
+                ctx.data_mut(|d| d.remove::<String>(egui::Id::new("metric_search_text")));
+            }
+        }
+        
+        // Metric popup window
+        if let Some(metric_name) = &self.expanded_metric.clone() {
+            let mut open = true;
+            
+            // Check default metrics first
+            let metric = match metric_name.as_str() {
+                "Connected Peers" => Some(&self.metrics.peers_connected),
+                "Block Height" => Some(&self.metrics.block_height),
+                "Sync Progress" => Some(&self.metrics.sync_progress),
+                "Memory Usage" => Some(&self.metrics.memory_usage),
+                "Active Downloads" => Some(&self.metrics.disk_io),
+                _ => {
+                    // Check custom metrics
+                    self.metrics.custom_metrics.get(metric_name)
+                }
+            };
+            
+            if let Some(metric) = metric {
+                let display_name = if metric_name.contains('_') {
+                    // For custom metrics, display a nicer name
+                    metric_name.replace('_', " ")
+                        .split_whitespace()
+                        .map(|word| {
+                            let mut chars = word.chars();
+                            match chars.next() {
+                                None => String::new(),
+                                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                } else {
+                    metric_name.clone()
+                };
+                
+                egui::Window::new(&format!("{} - Full History", display_name))
+                    .resizable(true)
+                    .default_width(900.0)
+                    .default_height(600.0)
+                    .open(&mut open)
+                    .show(ctx, |ui| {
+                        // Show current value
+                        if let Some(current) = metric.get_latest() {
+                            let unit_display = if metric.unit == "bytes" {
+                                "MB"
+                            } else {
+                                &metric.unit
+                            };
+                            ui.heading(format!("Current: {:.2} {}", current, unit_display));
+                        }
+                        ui.separator();
+                        
+                        // Show the full graph
+                        ui.vertical(|ui| {
+                            ui.set_height(500.0);
+                            self.draw_metric_graph(ui, metric);
+                        });
+                        
+                        ui.separator();
+                        ui.label(format!("Showing {} data points (up to 10 minutes)", metric.values.len()));
+                    });
+                    
+                if !open {
+                    self.expanded_metric = None;
+                }
+            } else {
+                self.expanded_metric = None;
+            }
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical()

@@ -8,6 +8,8 @@ pub struct DesktopSettings {
     #[serde(default)]
     pub custom_launch_args: Vec<String>,
     #[serde(default)]
+    pub custom_metrics: Vec<String>, // List of custom metric names to display
+    #[serde(default)]
     pub reth_defaults: RethDefaults,
 }
 
@@ -79,6 +81,7 @@ impl Default for DesktopSettings {
         Self {
             keep_reth_running_in_background: false,
             custom_launch_args: Vec::new(),
+            custom_metrics: Vec::new(),
             reth_defaults: RethDefaults::default(),
         }
     }
